@@ -1,0 +1,8 @@
+# Переносы строк: скрипты Windows должны остаться с CRLF,
+# остальное — как принято в git.
+* text=auto
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf

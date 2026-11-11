@@ -1,0 +1,17 @@
+# Личные файлы и рабочий мусор — в репозиторий не попадают.
+# Всё это создаётся само при первом запуске.
+state.json
+report.txt
+bridge.lock
+steam-cache.json
+local-saves-cache.json
+
+# Свои списки папок и привязок: у каждого они свои.
+roots.txt
+games.txt
+local-saves.json
+
+# Мелочи Python
+__pycache__/
+*.pyc
+*.pyo
