@@ -4,7 +4,8 @@
 > This repo reroutes your achievements into Hydra Launcher. That bug annoyed the hell
 > out of me for ages, so I built a fix and figured I'd share it. Enjoy!)
 
-**This isn't just a bridge for a couple of emulators — it knows pretty much all of them.**
+**This isn't just a bridge for a couple of emulators — it knows 19 of them and roughly
+70 places where they stash your achievements.**
 
 **A full pass takes about a second.** Real run: 4 bridges at once (The Henry Stickmin
 Collection — 8 achievements, Nodebuster — 13, Click the Button — 9, Moon Sweepers — 8),
@@ -74,10 +75,11 @@ Popped in-game, and the bridge picked it up along with the rest.
 
 ## Features
 
-- **50+ known locations** across Goldberg, GSE, CODEX, RUNE, EMPRESS, OnlineFix,
-  SKIDROW, SmartSteamEmu, CreamAPI, RLD!, Reloaded/3DM, DODI, ALI213,
-  Hoodlum/DARKSiDERS, RLE, Razor1911, TENOKE, KaOs — plus emulator configs and save
-  folders inside the game directory itself.
+- **Roughly 70 spots across 19 emulators** — 50 search paths plus 18 base emulator
+  folders. Covers Goldberg, GSE, CODEX, RUNE, EMPRESS, OnlineFix, SKIDROW, SmartSteamEmu,
+  CreamAPI, RLD!, Reloaded/3DM, DODI, ALI213, Hoodlum/DARKSiDERS, RLE, Razor1911,
+  TENOKE, KaOs and SOVEREIGN — plus emulator configs and save folders inside the game
+  directory itself.
 - **All known formats**: every INI flavour, Goldberg/EMPRESS JSON, SmartSteamEmu's
   binary `stats.bin`, the GreenLuma registry.
 - **Unknown formats still work**: any file that looks like achievement data gets run
@@ -112,7 +114,7 @@ manual setup, a window full of buttons you have to keep open. This one goes the 
 
 | | Typical bridges | This one |
 |---|---|---|
-| Emulators | one or two (usually RUNE and Goldberg) | 50+ locations, every known format |
+| Emulators | one or two (usually RUNE and Goldberg) | 19 emulators, ~70 spots, every known format |
 | Unknown format | ignored | a sniffer runs every parser on the file |
 | Lost appid | achievements just aren't found | routed by matching names against game schemas |
 | Game's own achievement tracking | usually no | Godot and Adobe AIR saves |
