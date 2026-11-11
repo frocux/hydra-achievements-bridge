@@ -2109,7 +2109,7 @@ def main(argv=None) -> int:
         epilog="Примеры:\n"
                "  python bridge.py               обычный прогон\n"
                "  python bridge.py --dry-run     только показать\n"
-               "  python bridge.py --watch 60    следить, обновляя раз в минуту\n",
+               "  python bridge.py --watch 10    следить, обновляя раз в 10 секунд\n",
     )
     parser.add_argument("--dry-run", action="store_true",
                         help="ничего не писать, только показать план")

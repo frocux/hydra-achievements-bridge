@@ -1,5 +1,5 @@
 ﻿# Включает автозапуск моста: тихий Python без окна следит за достижениями
-# и переносит новое каждую минуту. Права администратора не нужны.
+# и переносит новое каждые 10 секунд. Права администратора не нужны.
 #
 # Лежит ярлык здесь: Автозагрузка (Startup). Убрать — autostart-off.bat.
 
@@ -45,7 +45,7 @@ $lnkPath = Join-Path $startup 'Мост достижений Hydra.lnk'
 $shell = New-Object -ComObject WScript.Shell
 $lnk = $shell.CreateShortcut($lnkPath)
 $lnk.TargetPath = $target
-$lnk.Arguments = '"' + (Join-Path $here 'bridge.py') + '" --watch 60'
+$lnk.Arguments = '"' + (Join-Path $here 'bridge.py') + '" --watch 10'
 $lnk.WorkingDirectory = $here
 $lnk.Description = 'Тихо переносит достижения эмуляторов туда, где их видит Hydra Launcher'
 $lnk.Save()
@@ -55,5 +55,5 @@ Write-Host "Ярлык: $lnkPath"
 Write-Host "Мост включится сам при следующем входе в Windows."
 Write-Host "Прямо сейчас запускаю его вручную..."
 
-Start-Process -FilePath $target -ArgumentList ('"' + (Join-Path $here 'bridge.py') + '" --watch 60') -WorkingDirectory $here
+Start-Process -FilePath $target -ArgumentList ('"' + (Join-Path $here 'bridge.py') + '" --watch 10') -WorkingDirectory $here
 Write-Host "Готово. Он работает тихо, окна не будет." -ForegroundColor Green

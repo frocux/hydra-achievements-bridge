@@ -1,124 +1,141 @@
-# Мост достижений для Hydra Launcher
+# Achievement Bridge for Hydra Launcher
 
-> **Ребят, эта херня меня реально задолбала — и я решил её починить!!**
-> Этот репозиторий перенаправляет достижения в Hydra Launcher. Проблема бесила меня
-> огромное количество времени, так что я сделал решение и делюсь с вами)) Пользуйтесь!)
+## 🇷🇺 [Читать по-русски / Read in Russian →](README.ru.md)
 
-**Это не просто мостик между парой эмуляторов и Hydra — он знает 19 эмуляторов
-и около 70 мест, где те прячут достижения.**
+> **Alright folks, this thing drove me up the wall — so I went and fixed it!!**
+> This repo reroutes your achievements into Hydra Launcher. That bug annoyed the hell
+> out of me for ages, so I built a fix and figured I'd share it. Enjoy!)
 
-**Прогон — буквально секунда.** Живой пример: 4 моста разом (The Henry Stickmin
-Collection — 8 достижений, Nodebuster — 13, Click the Button — 9, Moon Sweepers — 8) —
-итого 1 секунда. Играть можно, пока он работает в фоне.
+**This isn't just a bridge for a couple of emulators — it knows 19 of them and roughly
+70 places where they stash your achievements.**
 
-**Hydra Launcher видит достижения только по строго заданным адресам. Этот скрипт сам
-находит их где угодно ещё и переносит туда, где Hydra их точно прочитает.**
+**A full pass takes about a second.** Real run: 4 bridges at once (The Henry Stickmin
+Collection — 8 achievements, Nodebuster — 13, Click the Button — 9, Moon Sweepers — 8),
+done in 1 second. It runs in the background while you play.
 
-`Python 3.8+` · без сторонних библиотек · Windows · [English version](README.en.md)
+**Hydra Launcher only looks for achievement files at a fixed set of paths. This script
+finds them anywhere else on your PC and copies them where Hydra is guaranteed to read them.**
+
+`Python 3.8+` · no third-party libraries · Windows
+
+> Heads up: the script talks to you in Russian. The code is plain Python and
+> `--help` lists every option, but the console output and comments are Russian.
 
 ---
 
-## Зачем это нужно
+## Why you'd need this
 
-Hydra ищет файлы достижений **только по строго определённым адресам** и всегда в папке
-с номером игры (appid). Примерно так:
+Hydra scans achievement files only at specific paths, always inside a folder named
+after the game's Steam appid, like this:
 
 ```
-%APPDATA%\GSE Saves\<номер игры>\achievements.json
-C:\Users\Public\Documents\Steam\RUNE\<номер игры>\achievements.ini
+%APPDATA%\GSE Saves\<appid>\achievements.json
+C:\Users\Public\Documents\Steam\RUNE\<appid>\achievements.ini
 ```
 
-Пока эмулятор аккуратный — всё хорошо. Например, **Carrion**: там эмулятор почти как
-настоящий Steam, он сам кладёт достижения куда надо, и Hydra их показывает без всяких
-костылей. Трогать такие игры не нужно, скрипт их и не трогает.
+When the emulator behaves, everything is fine. **Carrion** is a good example: its
+emulator acts almost like real Steam, drops achievements exactly where they belong,
+and Hydra shows them with no hacks needed. Games like that need no fixing — and the
+script leaves them alone.
 
-А бывает иначе, и тогда достижений в лаунчере нет вообще. Три частых случая:
+But sometimes it's a whole different story, and you get zero achievements in the
+launcher. Three common cases:
 
-1. **Эмулятор пишет в незнакомое место.** Некоторые (например SOVEREIGN) складывают
-   достижения прямо в свой `.ini` рядом с игрой. Hydra туда не смотрит вообще.
-2. **Номер игры потерялся.** Если в `steam_appid.txt` вместо числа написана какая-то
-   ерунда, эмулятор не понимает, что за игра, и сваливает всё в папку `0`. Hydra ищет
-   в папке со своим номером — и не находит ничего.
-3. **Эмулятора вообще нет.** Антивирус съел подменную `steam_api.dll`, осталась родная
-   от Valve. Steam-API в игре не поднимается, достижения нигде не копятся — кроме
-   собственного сохранения самой игры.
+1. **The emulator saves somewhere else.** Some of them (SOVEREIGN, for one) keep
+   achievements inside their own `.ini` file next to the game. Hydra never looks there.
+2. **The appid got lost.** If `steam_appid.txt` holds junk instead of a number, the
+   emulator has no idea which game it is and dumps everything into a folder named `0`.
+   Hydra looks in the folder with the real appid and finds nothing. (A very common
+   stand-in is `480` — that's Spacewar, Valve's own test app — and the script ignores it.)
+3. **There's no emulator at all.** An antivirus ate the cracked `steam_api.dll` and the
+   genuine Valve one is left behind. The game's Steam API never initialises, so
+   achievements are only tracked by the game's own save file.
 
-Скрипт лечит все три: находит достижения, сам разбирается, чьей игре они принадлежат,
-и перекладывает туда, куда Hydra точно смотрит.
-
----
-
-## Как это выглядит
-
-[![Ачивка вылезла в игре, а в Hydra пусто](media/henry-achievement.gif)](media/henry-achievement.mp4)
-
-Чаще всего Генри Стикман кидает свои достижения туда, куда Hydra вообще не смотрит.
-Вот на видео ачивка вылезла — а в лаунчере пусто, потому что лежит она в собственной
-папке игры в `%APPDATA%`, а не там, где Hydra ищет. Ровно для этого и есть этот мост:
-он забирает их оттуда и кладёт куда надо. Открыл ачивку — она уже в Hydra, руками
-ничего трогать не надо.
-
-*(клик по картинке — полное видео, 23 секунды)*
-
-А вот вторая, уже из «Stealing the Diamond» — **BUNP. I TOLD you about stairs.**
-Тоже вылезла в игре, и мост её спокойно подхватил вместе с остальными.
-
-![Ачивка BUNP в Henry Stickmin](media/henry-bunp.png)
+The script handles all three: it finds the achievements, works out which game they
+belong to, and copies them where Hydra will definitely see them.
 
 ---
 
-## Что он умеет
+## See it in action
 
-| Умение | Как это выглядит на практике |
-|---|---|
-| **Около 70 мест, 19 эмуляторов** | 50 адресов поиска плюс 18 базовых папок. Знает Goldberg, GSE, CODEX, RUNE, EMPRESS, OnlineFix, SKIDROW, SmartSteamEmu, CreamAPI, RLD!, Reloaded/3DM, DODI, ALI213, Hoodlum/DARKSiDERS, RLE, Razor1911, TENOKE, KaOs и SOVEREIGN — плюс конфиги и сохранения прямо в папке игры |
-| **Все известные форматы** | INI во всех видах, JSON Goldberg/EMPRESS, бинарный `stats.bin` SmartSteamEmu, реестр GreenLuma |
-| **Незнакомый формат — не беда** | Если файл похож на достижения, скрипт пробует на нём все разборщики по очереди. Новые эмуляторы обычно подхватываются сами, без правок кода |
-| **Любая кодировка** | UTF-8, cp1251, UTF-16 — и с меткой в начале, и без. Старые INI от русских репаков читаются как миленькие |
-| **Потерянный номер игры** | Раскладывает достижения по играм, сверяя названия со схемами достижений (`steam_settings\achievements.json` в папке игры) |
-| **Определяет эмулятор** | Смотрит на файлы игры и пишет в отчёт, какой там эмулятор — и предупреждает, если он не работает |
-| **Свои сохранения игр** | Если игра сама ведёт учёт достижений (например Godot-игра в `save.json`), скрипт читает и его, а карту «внутреннее имя → имя в Steam» достаёт прямо из файлов игры |
-| **Игры на Adobe AIR** | Flash-порты держат прогресс в `%APPDATA%\<id>\Local Store`, в сжатых `.sav` — скрипт распаковывает их и достаёт оттуда достижения |
-| **Реестр Windows** | GreenLuma (там прогресс в реестре) и вообще обход `HKCU\Software` — на случай эмуляторов, которые пишут туда |
+[![Achievement popped in-game, launcher still empty](media/henry-achievement.gif)](media/henry-achievement.mp4)
 
-Куда переносит: в `%APPDATA%\GSE Saves\<номер игры>\achievements.json` в формате
-Goldberg. Это единственное место, которое Hydra читает **для любого** крака,
-поэтому одного файла хватает всем.
+Most of the time Henry Stickmin dumps its achievements in some hole Hydra never looks
+into. In the clip the achievement pops on screen — and the launcher is still empty,
+because it lives in the game's own folder under `%APPDATA%`, not where Hydra searches.
+That's exactly what this bridge is for: it grabs them there and drops them where they
+belong. Unlock it in-game and boom — it's already in Hydra, zero fiddling.
 
-Если в `GSE Saves\<номер игры>` уже лежит чужой файл (настоящие сохранения игры) —
-скрипт его не трогает, а пишет в запасное место
-`%APPDATA%\Goldberg SteamEmu Saves\<номер игры>\achievements.json`.
+*(click the image for the full 23-second clip)*
+
+And here's a second one, from "Stealing the Diamond" — **BUNP. I TOLD you about stairs.**
+Popped in-game, and the bridge picked it up along with the rest.
+
+![BUNP achievement in Henry Stickmin](media/henry-bunp.png)
 
 ---
 
-## Чем он отличается от других мостов
+## Features
 
-Таких инструментов наперечёт, и почти все они узкие: один-два эмулятора, ручная
-настройка, окно с кнопками, которое нужно держать открытым. Здесь другой подход.
+- **Roughly 70 spots across 19 emulators** — 50 search paths plus 18 base emulator
+  folders. Covers Goldberg, GSE, CODEX, RUNE, EMPRESS, OnlineFix, SKIDROW, SmartSteamEmu,
+  CreamAPI, RLD!, Reloaded/3DM, DODI, ALI213, Hoodlum/DARKSiDERS, RLE, Razor1911,
+  TENOKE, KaOs and SOVEREIGN — plus emulator configs and save folders inside the game
+  directory itself.
+- **All known formats**: every INI flavour, Goldberg/EMPRESS JSON, SmartSteamEmu's
+  binary `stats.bin`, the GreenLuma registry.
+- **Unknown formats still work**: any file that looks like achievement data gets run
+  through every parser in turn, so new emulators usually just work with no code changes.
+- **Any encoding**: UTF-8, cp1251, UTF-16, with or without a BOM. Old INI files from
+  Russian repacks read just fine.
+- **Safe writes**: files are written to a temp copy and swapped in one move (`os.replace`),
+  so Hydra never sees a half-written file — and the previous content stays next to it as `.bak`.
+- **Lost appid recovery**: achievements in a nameless folder (like `GSE Saves\0`) are
+  matched against each game's achievement schema and routed to the right game.
+- **Emulator detection**: reports which emulator a game folder uses, and warns when the
+  emulator is missing (genuine Valve DLL present).
+- **Game-side saves**: if a game tracks its own achievements (say, a Godot game's
+  `save.json`), the script reads it and derives the internal-name → Steam-api-name map
+  straight from the game's own files.
+- **Adobe AIR games**: Flash ports keep progress in `%APPDATA%\<id>\Local Store` as
+  compressed `.sav` files — the script unpacks them and pulls the achievements out.
+- **Windows registry**: GreenLuma (which keeps progress in the registry) plus a general
+  sweep of `HKCU\Software`, for any emulator that writes there.
 
-| | Обычные мосты | Этот |
+Output goes to `%APPDATA%\GSE Saves\<appid>\achievements.json` in Goldberg format — the
+one place Hydra reads for *any* crack. Existing foreign files are never overwritten; if
+that slot is taken, the script falls back to
+`%APPDATA%\Goldberg SteamEmu Saves\<appid>\achievements.json`.
+
+---
+
+## How it's different from other bridges
+
+Tools like this are rare, and almost all of them are narrow: one or two emulators,
+manual setup, a window full of buttons you have to keep open. This one goes the other way.
+
+| | Typical bridges | This one |
 |---|---|---|
-| Эмуляторы | один-два (чаще всего RUNE и Goldberg) | 19 эмуляторов, около 70 мест, все известные форматы |
-| Незнакомый формат | не читается | «нюхач» пробует на файле все разборщики |
-| Номер игры потерялся | достижения просто не находятся | раскладываются по играм сверкой со схемами |
-| Свой учёт достижений игры | обычно нет | сохранения Godot и Adobe AIR |
-| Реестр Windows | редко | GreenLuma + общий обход `HKCU\Software` |
-| Настройка | тащить папку в окно, права администратора | одна строка в `roots.txt` или вообще ничего |
-| Как работает | пока открыто окно | тихо, из автозагрузки, раз в минуту |
-| Антивирус | `.exe`, который Defender иногда съедает | обычный `.py`-скрипт: ругаться не на что |
+| Emulators | one or two (usually RUNE and Goldberg) | 19 emulators, ~70 spots, every known format |
+| Unknown format | ignored | a sniffer runs every parser on the file |
+| Lost appid | achievements just aren't found | routed by matching names against game schemas |
+| Game's own achievement tracking | usually no | Godot and Adobe AIR saves |
+| Windows registry | rarely | GreenLuma + a general `HKCU\Software` sweep |
+| Setup | drag a folder into a window, run as admin | one line in `roots.txt`, or nothing at all |
+| How it runs | while its window is open | quietly from startup, every 10 seconds |
+| Antivirus | an `.exe` Defender sometimes eats | a plain `.py` script — nothing to flag |
 
-Плюс он никогда не трогает папки игр и не требует прав администратора.
+And it never touches your game folders and never needs admin rights.
 
 ---
 
-## Установка
+## Install and run
 
-1. Нужен Python 3.8 или новее ([python.org](https://www.python.org/downloads/),
-   при установке галочка **Add Python to PATH**).
-2. Скачай папку с этим файлом куда угодно — например `C:\Tools\hydra-achievements-bridge`.
-3. Открой `roots.txt` и впиши папки, где лежат игры, по одной в строке.
-   Две самые ходовые (`C:\Games` и `D:\Games`) уже прописаны прямо в скрипте,
-   так что если игры лежат там — этот файл можно вообще не трогать:
+1. Install Python 3.8+ (tick **Add Python to PATH**).
+2. Put this folder anywhere you like, e.g. `C:\Tools\hydra-achievements-bridge`.
+3. Open `roots.txt` and list your game folders, one per line. The two most common
+   ones (`C:\Games` and `D:\Games`) are already built into the script, so if your
+   games live there you can leave this file alone entirely:
 
 ```
 C:\Games
@@ -126,139 +143,162 @@ D:\Games
 E:\SteamLibrary\steamapps\common
 ```
 
-4. Запусти `run.bat` (обычный прогон) и посмотри `report.txt` — там написано,
-   что нашлось и куда легло.
+4. Run `run.bat`, then read `report.txt` — it says what was found and where it went.
 
-Проверить, ничего не записывая: `check.bat`.
+Want a dry run first? `check.bat` shows everything without writing a thing.
+
+```
+python bridge.py                     normal run
+python bridge.py --dry-run           show what would happen, write nothing
+python bridge.py --watch 10          check every 10 seconds (what autostart uses)
+python bridge.py --watch 30          same, but rarer — much easier on your disk
+python bridge.py --watch             same, but every 30 seconds
+python bridge.py --roots E:\Games    add a game folder
+python bridge.py --online            allow appid lookups in the Steam store
+python bridge.py --quiet             short report
+```
+
+Optional autostart: `autostart-on.bat` drops a `pythonw.exe ... --watch 10` shortcut
+into your Startup folder; `autostart-off.bat` removes it. No admin rights, no services,
+no registry changes. Only one watcher can run at a time — a second one sees the
+`bridge.lock` and quits.
+
+**Note:** Hydra reads these files at startup — restart it once after the first run.
 
 ---
 
-## Запуск
+## It runs in the background — why it might stutter
 
-```
-python bridge.py                     обычный прогон
-python bridge.py --dry-run           только показать, ничего не писать
-python bridge.py --watch 60          следить, проверяя раз в минуту
-python bridge.py --watch             то же, но раз в 30 секунд
-python bridge.py --roots E:\Games    добавить папку с играми
-python bridge.py --online            разрешить искать номера игр в магазине Steam
-python bridge.py --quiet             короткий отчёт
-python bridge.py --help              все ключи
-```
+The bridge wakes up every 10 seconds, spends about a second on a pass, then sleeps again.
+That second is for 11 games. With three hundred games installed a pass takes noticeably
+longer, and that's worth keeping in mind.
 
-| Файл | Что делает |
+Straight talk about the stutter:
+
+- **Your disk wakes up every 10 seconds.** The bridge reads save files and emulator
+  folders, so on a laptop the disk barely gets to sleep and you'll hear the fans more.
+- **Antivirus.** Defender re-scans every file the bridge touches. That's time too.
+- **If your game and the bridge share a disk**, you may catch a micro-hitch during a pass.
+  Invisible with a dozen games, possibly noticeable with a huge library.
+
+The fix is one number: use `--watch 30` or `--watch 60` instead of 10. An achievement
+then reaches Hydra within half a minute, and in the background almost nothing happens.
+If you don't want a background watcher at all, just run `run.bat` by hand after playing —
+it does exactly the same thing.
+
+**One more thing, about the in-game toast.** We ran into this: with a 60-second interval
+the achievement showed up in Hydra but the in-game notification never fired. Looks like a
+race — the bridge writes the file before the game draws its toast, and the game assumes
+it's already been shown. We never pinned the exact cause down. With a 10-second interval
+we haven't seen it. If your popups go missing, try a shorter interval (`--watch 5`) and
+open an issue — we'll figure it out together.
+
+---
+
+## What it never does
+
+- Never deletes or modifies anything inside game folders — it only reads there.
+- Never downloads achievements; it only transfers what was actually earned locally.
+- Never touches files it didn't create (`state.json` remembers its own files).
+- Needs no administrator rights and installs nothing system-wide.
+
+---
+
+## If a game still doesn't show up
+
+Read `report.txt`. It'll say one of these:
+
+- **"appid lost... no idea whose folder this is"** — add a binding to `games.txt` as
+  `Game folder name = 1234567`. You'll find the number in the game's Steam store URL:
+  `store.steampowered.com/app/1234567/`.
+- **"this appid isn't in Hydra's database"** — the game isn't in your Hydra library.
+  Add it there first, then run the script again.
+- **the appid looks like 480** — that's not a game id, it's Spacewar, Valve's test app.
+  Repackers put it in `steam_appid.txt` just so the game launches. The bridge ignores
+  that number: put the real one in `games.txt`.
+- **"emulator isn't working: the original Valve steam_api is sitting next to it"** — your
+  antivirus ate the cracked library. If the game keeps its own achievement log, the
+  script will pull them from the save. Otherwise only reinstalling the emulator helps.
+- **"both slots are taken by foreign files"** — both `GSE Saves` and
+  `Goldberg SteamEmu Saves` already hold files for this game that aren't ours.
+
+---
+
+## Make it yours
+
+The licence is **MIT** — take it and do whatever you want: change it, cut bits out,
+rewrite it, drop it into your own builds, ship it further. One condition: keep the
+licence text, and don't be shocked if something doesn't work :) That's what it's out
+here for.
+
+The handy part: **it's a single plain-Python file** — no build step, no libraries, no
+installer. Grab it, open it in Notepad, start hacking.
+
+Where things live:
+
+| I want to | Look at |
 |---|---|
-| `check.bat` | примерочный прогон: показывает, что нашёл, но ничего не пишет |
-| `run.bat` | обычный прогон |
-| `watch.bat` | следит, пока открыто окно, обновляя раз в 30 секунд |
-| `autostart-on.bat` | включить автозапуск |
-| `autostart-off.bat` | выключить автозапуск и остановить слежение |
+| Add my own emulator folder | the `LOCATION_TEMPLATES` table at the top of `bridge.py` — one line |
+| Add a base folder that paths hang off | `EMU_BASE_DIRS`, right there |
+| Teach it to recognise a new emulator | `EMU_MARKERS`, right there |
+| Parse a format it doesn't know | the parsers `parse_ini`, `parse_json_achievements`, `parse_sse_bin`, and the sniffer `sniff_file` that runs them in turn |
+| Change how often it checks | the `--watch` flag, or the number in the startup shortcut |
+| Add my game folders and bindings | `roots.txt`, `games.txt` |
+| Games that track achievements themselves | `local-saves.json` |
+
+Comments in the code are Russian, and every table is labelled in words — a beginner can
+follow it. Fork it, add your own emulators, send patches: the tables exist for exactly
+that, and there's nothing tricky in them.
 
 ---
 
-## Автозапуск
-
-`autostart-on.bat` кладёт в папку «Автозагрузка» ярлык такого вида:
+## Files
 
 ```
-pythonw.exe  "<папка проекта>\bridge.py" --watch 60
-```
-
-`pythonw.exe` — тот же Python, только без чёрного окна. Раз в минуту он просыпается,
-тратит секунду на проверку и снова спит. Открыл новое достижение — через минуту
-оно уже в Hydra.
-
-Никаких прав администратора и никаких служб. Выключить — `autostart-off.bat`:
-он убирает ярлык и останавливает уже работающий процесс. Достижения, которые
-скрипт успел перенести, при этом никуда не деваются.
-
-Два слежения одновременно запуститься не могут: второе увидит замок `bridge.lock`
-и просто выйдет.
-
-**Важно:** Hydra читает достижения не мгновенно. Самый первый раз после прогона
-закрой и снова открой Hydra — она перечитает файлы на старте.
-
----
-
-## Чего он не делает
-
-- **Ничего не удаляет и не меняет в папках игр.** Только читает оттуда и пишет свои
-  файлы в `%APPDATA%`.
-- Не качает достижения из интернета — переносит только то, что реально наиграно
-  на этом компьютере.
-- Не трогает файлы, которых не создавал сам: `state.json` помнит список своих.
-  Сомневаешься — удали `state.json`, и скрипт перестанет считать старые файлы своими.
-- Не требует прав администратора и ничего не ставит в систему.
-
----
-
-## Если какая-то игра всё равно не видна
-
-Смотри `report.txt`. Там будет одна из надписей:
-
-- **«номер игры потерян… чья папка, непонятно»** — допиши привязку в `games.txt`
-  строкой вида `Название папки игры = 1234567`. Номер виден в адресе страницы игры
-  в Steam: `store.steampowered.com/app/1234567/`.
-- **«в базе Hydra этого номера не нашлось»** — игра не добавлена в библиотеку Hydra.
-  Сначала добавь игру, потом гоняй скрипт заново.
-- **номер игры выглядит как 480** — это не номер игры, а Spacewar, тестовое приложение
-  Valve. Сборщики пишут его в `steam_appid.txt`, чтобы игра просто запустилась. Мост
-  такой номер игнорирует: допиши настоящий в `games.txt`.
-- **«эмулятор не работает: рядом лежит оригинальная steam_api от Valve»** — подменную
-  библиотеку удалил антивирус. Если игра ведёт свой учёт достижений, скрипт вытащит
-  их из сохранения. Иначе поможет только переустановка эмулятора.
-- **«оба места заняты чужими файлами»** — и в `GSE Saves`, и в
-  `Goldberg SteamEmu Saves` уже лежат файлы этой игры не от нас.
-
----
-
-## Файлы
-
-```
-bridge.py               сам скрипт
-roots.txt               папки с играми (впиши свои)
-games.txt               ручные привязки «папка игры = номер игры»
-local-saves.json        ручные карты имён для игр со своим учётом достижений
-state.json              какие файлы создал скрипт (появляется после прогона)
-report.txt              отчёт последнего прогона
-bridge.lock             замок: чтобы два слежения не запустились разом
-steam-cache.json        кэш поиска номеров в Steam (только с ключом --online)
-local-saves-cache.json  кэш разбора файлов игр
-check.bat, run.bat, watch.bat, autostart-*.bat   запускалки для Windows
-autostart-on.ps1, autostart-off.ps1              работа автозапуска
-roots.example.txt, games.example.txt             шаблоны настроек
-media/                                           картинки и видео для этого README
+bridge.py               the script itself
+README.md               this page, English (the main one)
+README.ru.md            the same page, Russian
+LICENSE                 MIT licence
+roots.txt               your game folders (fill this in)
+games.txt               manual "game folder = appid" bindings
+local-saves.json        manual name maps for games with their own achievement log
+state.json              which files the script created (appears after a run)
+report.txt              the last run's report
+bridge.lock             the lock: so two watchers don't start at once
+steam-cache.json        appid lookup cache (only with --online)
+local-saves-cache.json  cache of parsed game files
+check.bat, run.bat, watch.bat, autostart-*.bat   Windows launchers
+autostart-on.ps1, autostart-off.ps1              autostart plumbing
+roots.example.txt, games.example.txt             config templates
+media/                                           images and video for this README
 ```
 
 ---
 
-## Как это работает внутри
+## How it works under the hood
 
-- Точки поиска и форматы описаны таблицами в начале `bridge.py` — добавить новый
-  эмулятор обычно значит дописать одну строку в таблицу.
-- Если файл похож на достижения, но формат незнакомый, включается «нюхач»: он пробует
-  на файле все разборщики по очереди.
-- Странные папки вроде `GSE Saves\0` разбираются по смыслу: названия достижений
-  сверяются со схемами игр, и каждое уходит своей игре.
-- Карта «внутреннее имя → имя в Steam» для игр со своим учётом достижений строится
-  из файлов самой игры (в Godot-играх настоящее имя достижения лежит строкой сразу
-  после его описания `...__DESC`).
-- У игр на Adobe AIR файлы из `Local Store` распаковываются как сырой deflate,
-  а внутри читаются записи «длина + текст».
-- Достижения в реестре ищутся только чтением: сначала известные ветки GreenLuma,
-  потом общий обход `HKCU\Software` на небольшую глубину.
-- Свои файлы пишутся через временный и подменяются одним движением (`os.replace`) —
-  недописанный файл Hydra не увидит. Прежнее содержимое остаётся рядом как `.bak`.
+- Search locations and formats are described by tables at the top of `bridge.py` —
+  adding a new emulator usually means one more line in a table.
+- If a file looks like achievements but the format is unfamiliar, the sniffer kicks in
+  and runs every parser on it in turn.
+- Odd folders like `GSE Saves\0` are sorted out by meaning: achievement names are
+  matched against game schemas, and each one goes to its own game.
+- The internal-name → Steam-name map for games with their own achievement log is built
+  from the game's own files (in Godot games the real achievement name sits on the line
+  right after its `...__DESC` description).
+- For Adobe AIR games, files in `Local Store` are unpacked as raw deflate, then read as
+  "length + text" records.
+- Registry achievements are read-only: known GreenLuma branches first, then a shallow
+  sweep of `HKCU\Software`.
+- Its own files are written to a temp copy and swapped in one move (`os.replace`), so
+  Hydra can never catch a half-written file. The previous content stays next to it as `.bak`.
 
-Идеи и форматы подсмотрены в открытых проектах
-[Achievement Watcher](https://github.com/xan105/Achievement-Watcher) и
-[Hydra Launcher](https://github.com/hydralauncher/hydra). Спасибо их авторам.
+Storage locations and file formats were learned from
+[Achievement Watcher](https://github.com/xan105/Achievement-Watcher) and
+[Hydra Launcher](https://github.com/hydralauncher/hydra). Thanks to their authors.
 
-Автор: **frocux**.
+Author: **frocux**.
 
----
+## License
 
-## Лицензия
-
-MIT — делай что хочешь, только не жалуйся, если что-то не заработало.
-Текст лицензии в файле [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).
