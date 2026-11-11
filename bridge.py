@@ -1923,6 +1923,7 @@ def run_once(args) -> int:
 
     say("Мост достижений для Hydra")
     say("=" * 60)
+    say(f"Обновлено: {time.strftime('%d.%m.%Y %H:%M')}")
 
     roots = [Path(p) for p in (args.roots or DEFAULT_ROOTS)]
     for line in read_text(ROOTS_FILE).splitlines():

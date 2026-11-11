@@ -47,6 +47,25 @@ C:\Users\Public\Documents\Steam\RUNE\<номер игры>\achievements.ini
 
 ---
 
+## Как это выглядит
+
+[![Ачивка вылезла в игре, а в Hydra пусто](media/henry-achievement.gif)](media/henry-achievement.mp4)
+
+Чаще всего Генри Стикман кидает свои достижения туда, куда Hydra вообще не смотрит.
+Вот на видео ачивка вылезла — а в лаунчере пусто, потому что лежит она в собственной
+папке игры в `%APPDATA%`, а не там, где Hydra ищет. Ровно для этого и есть этот мост:
+он забирает их оттуда и кладёт куда надо. Открыл ачивку — она уже в Hydra, руками
+ничего трогать не надо.
+
+*(клик по картинке — полное видео, 23 секунды)*
+
+А вот вторая, уже из «Stealing the Diamond» — **BUNP. I TOLD you about stairs.**
+Тоже вылезла в игре, и мост её спокойно подхватил вместе с остальными.
+
+![Ачивка BUNP в Henry Stickmin](media/henry-bunp.png)
+
+---
+
 ## Что он умеет
 
 | Умение | Как это выглядит на практике |
@@ -207,6 +226,7 @@ local-saves-cache.json  кэш разбора файлов игр
 check.bat, run.bat, watch.bat, autostart-*.bat   запускалки для Windows
 autostart-on.ps1, autostart-off.ps1              работа автозапуска
 roots.example.txt, games.example.txt             шаблоны настроек
+media/                                           картинки и видео для этого README
 ```
 
 ---

@@ -53,6 +53,25 @@ belong to, and copies them where Hydra will definitely see them.
 
 ---
 
+## See it in action
+
+[![Achievement popped in-game, launcher still empty](media/henry-achievement.gif)](media/henry-achievement.mp4)
+
+Most of the time Henry Stickmin dumps its achievements in some hole Hydra never looks
+into. In the clip the achievement pops on screen — and the launcher is still empty,
+because it lives in the game's own folder under `%APPDATA%`, not where Hydra searches.
+That's exactly what this bridge is for: it grabs them there and drops them where they
+belong. Unlock it in-game and boom — it's already in Hydra, zero fiddling.
+
+*(click the image for the full 23-second clip)*
+
+And here's a second one, from "Stealing the Diamond" — **BUNP. I TOLD you about stairs.**
+Popped in-game, and the bridge picked it up along with the rest.
+
+![BUNP achievement in Henry Stickmin](media/henry-bunp.png)
+
+---
+
 ## Features
 
 - **50+ known locations** across Goldberg, GSE, CODEX, RUNE, EMPRESS, OnlineFix,
