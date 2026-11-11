@@ -146,11 +146,45 @@ ACH_FILE_RE = re.compile(
 
 
 def read_text(path: Path) -> str:
-    """Читает текстовый файл, не падая на странных символах и кодировках."""
-    try:
-        return path.read_text(encoding="utf-8-sig", errors="replace")
-    except OSError:
+    """Читает текстовый файл, не падая на странных символах и кодировках.
+
+    Эмуляторы пишут кто в UTF-8, кто в cp1251, а кто и в UTF-16 — поэтому
+    сначала смотрим на метку в начале файла, а потом пробуем по очереди.
+    """
+    raw = read_bytes(path)
+    if not raw:
         return ""
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw.decode("utf-16", errors="replace")
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw.decode("utf-8-sig", errors="replace")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    try:
+        return raw.decode("cp1251")
+    except UnicodeDecodeError:
+        return raw.decode("utf-8", errors="replace")
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    """Пишет текстовый файл через временный и с резервной копией.
+
+    Два смысла. Первый: файл появляется на диске целиком, одним движением
+    (os.replace), а не по кусочкам — Hydra в этот момент не увидит
+    половинку. Второй: прежнее содержимое остаётся рядом как «.bak»,
+    так что вернуть всё назад можно руками, без нас.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        try:
+            path.with_name(path.name + ".bak").write_bytes(path.read_bytes())
+        except OSError:
+            pass                      # копия — не повод не записать главное
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def read_bytes(path: Path, limit: int = MAX_SNIFF_SIZE) -> bytes:
@@ -848,7 +882,7 @@ def identify_emulator(game_dir: Path) -> tuple[list[str], str]:
 
     # Конфиги эмулятора могут лежать и в подпапке
     if not names:
-        for here, _dirnames, filenames in iter_dirs(game_dir, 2):
+        for here, _dirnames, filenames in iter_dirs(game_dir, 3):
             low = {f.lower() for f in filenames}
             for label, markers in EMU_MARKERS:
                 if any(marker in low for marker in markers) and label not in names:
@@ -869,16 +903,31 @@ EMU_DLL_MARKERS = (
 VALVE_DLL_MARKERS = (b"valve corp", b"valve corporation", b"steam client api")
 
 
-def check_steam_dlls(game_dir: Path) -> str:
+def check_steam_dlls(game_dir: Path, emu_dir: Path | None = None) -> str:
     """Проверяет, живой ли эмулятор лежит рядом с игрой.
 
     Частая беда: антивирус съедает подменную steam_api.dll, и остаётся
     оригинальная от Valve. Тогда Steam-API в игре не поднимается вообще,
     достижения нигде не копятся, и никакой мост их не найдёт — кроме
     собственного сохранения самой игры.
+
+    Осторожно с выводами: RUNE и другие эмуляторы не пишут свой файл
+    с нуля, а берут родную Valve-библиотеку и правят её. Внутри такого
+    файла остаются строки Valve, и подпись перестаёт сходиться. Поэтому
+    «Valve внутри» само по себе ничего не значит: смотрим, есть ли рядом
+    хоть какие-то собственные файлы эмулятора.
     """
+    for base in (game_dir, emu_dir):
+        if base is None or not base.is_dir():
+            continue
+        for here, _dirnames, filenames in iter_dirs(base, 3):
+            low = {f.lower() for f in filenames}
+            for _label, markers in EMU_MARKERS:
+                if any(marker in low for marker in markers):
+                    return ""       # эмулятор на месте, ругаться не на что
+
     dlls: list[Path] = []
-    for here, _dirnames, filenames in iter_dirs(game_dir, 2):
+    for here, _dirnames, filenames in iter_dirs(game_dir, 3):
         for filename in filenames:
             low = filename.lower()
             if low.endswith(".dll") and low.startswith(("steam_api", "steamclient")):
@@ -906,9 +955,10 @@ class GameInfo:
     """Игра, найденная на диске: папка, схема достижений и номер."""
 
     __slots__ = ("path", "ach_names", "appid", "appid_note", "emu_names",
-                 "has_schema", "emu_hint")
+                 "has_schema", "emu_hint", "emu_dir")
 
-    def __init__(self, path: Path, ach_names: set[str], has_schema: bool = True):
+    def __init__(self, path: Path, ach_names: set[str], has_schema: bool = True,
+                 emu_dir: Path | None = None):
         self.path = path
         self.ach_names = ach_names      # технические имена достижений в нижнем регистре
         self.appid = ""
@@ -916,6 +966,10 @@ class GameInfo:
         self.emu_names: list[str] = []
         self.has_schema = has_schema
         self.emu_hint = ""              # предупреждение про нерабочий эмулятор
+        # У Unity-игр эмулятор часто лежит не в корне, а глубоко внутри:
+        # Hollow Knight\..._Data\Plugins\x86_64. Тогда «папка игры» — корень,
+        # а «папка эмулятора» — та, что глубже.
+        self.emu_dir = emu_dir
 
     @property
     def title(self) -> str:
@@ -931,21 +985,47 @@ def scan_games(roots: list[Path]) -> list[GameInfo]:
     """
     found: dict[str, GameInfo] = {}
 
-    def register(game_dir: Path, schema_names: set[str] | None) -> None:
+    def register(game_dir: Path, schema_names: set[str] | None,
+                 emu_dir: Path | None = None) -> None:
         key = str(game_dir).lower()
         if key not in found:
             found[key] = GameInfo(game_dir, schema_names or set(),
-                                  has_schema=schema_names is not None)
+                                  has_schema=schema_names is not None,
+                                  emu_dir=emu_dir)
         elif schema_names is not None and not found[key].ach_names:
             found[key].ach_names = schema_names
             found[key].has_schema = True
 
+    def game_root_from_engine_dir(here: Path) -> Path | None:
+        """Из внутренностей движка достаёт корень игры.
+
+        Бывает так: в корне игры ни одного файла эмулятора нет, всё спрятано
+        в «..._Data/Plugins/x86_64». Поднимаемся вверх, пока не найдём папку
+        игры — ту, где лежит «..._Data» или сам .exe.
+        """
+        root = here
+        for _ in range(4):
+            parent = root.parent
+            if parent == root:
+                break
+            root = parent
+            name = root.name.lower()
+            if name.endswith("_data") or name in ENGINE_DIR_NAMES:
+                continue
+            try:
+                has_exe = any(p.suffix.lower() == ".exe" for p in root.iterdir()
+                              if p.is_file())
+                has_data = any(p.is_dir() and p.name.lower().endswith("_data")
+                               for p in root.iterdir())
+            except OSError:
+                return None
+            if has_exe or has_data:
+                return root
+            return None
+        return None
+
     for root in roots:
         for here, _dirnames, filenames in iter_dirs(root):
-            # «x86_64», «Plugins» и подобное — это внутренности движка,
-            # а не папка игры: там лежат только копии steam_api.dll
-            if here.name.lower() in ENGINE_DIR_NAMES:
-                continue
             lowers = {f.lower() for f in filenames}
             if not any(name in lowers for name in ("steam_settings", "steam_emu.ini",
                                                    "sovereign.ini", "smartsteamemu.ini",
@@ -962,6 +1042,14 @@ def scan_games(roots: list[Path]) -> list[GameInfo]:
                              for item in parsed
                              if isinstance(item, dict) and item.get("name")}
                     schema_names = names or None
+            # «x86_64», «Plugins» и подобное — это внутренности движка, а не
+            # папка игры: там лежат только копии steam_api.dll. Но игру всё
+            # равно надо взять на заметку — иначе она выпадет из отчёта.
+            if here.name.lower() in ENGINE_DIR_NAMES:
+                game_dir = game_root_from_engine_dir(here)
+                if game_dir is not None:
+                    register(game_dir, schema_names, emu_dir=here)
+                continue
             register(here, schema_names)
 
     return list(found.values())
@@ -1647,10 +1735,15 @@ def collect_sources(roots: list[Path], games: list[GameInfo], ours: set[str],
 
     # 1. Места, привязанные к номеру игры (в том числе внутри папок игр)
     for game in games:
-        for label, tpl in LOCATION_TEMPLATES:
-            for base in expand_template(tpl, game.appid, game.path):
-                for path in candidate_files(base):
-                    add(label, path, game.appid)
+        # у Unity-игр файлы эмулятора лежат в глубине папки игры, поэтому
+        # шаблоны раскрываем и от корня, и от папки эмулятора
+        for game_dir in (game.path, game.emu_dir):
+            if game_dir is None:
+                continue
+            for label, tpl in LOCATION_TEMPLATES:
+                for base in expand_template(tpl, game.appid, game_dir):
+                    for path in candidate_files(base):
+                        add(label, path, game.appid)
 
     # 2. Целиком папки эмуляторов: тут могут лежать сохранения с «потерянным»
     #    номером (например папка «0»), поэтому смотрим все подпапки
@@ -1765,8 +1858,8 @@ def load_state() -> dict:
 
 
 def save_state(state: dict) -> None:
-    STATE_FILE.write_text(
-        json.dumps(state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    write_text_atomic(
+        STATE_FILE, json.dumps(state, indent=2, ensure_ascii=False) + "\n"
     )
 
 
@@ -1808,10 +1901,9 @@ def write_bridge_file(appid: str, achievements: Achievements, ours: set[str],
         added += 1
 
     if added and not dry_run:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
+        write_text_atomic(
+            target,
             json.dumps(raw, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
-            encoding="utf-8",
         )
         ours.add(str(target))
     return target, added, ""
@@ -1852,7 +1944,7 @@ def run_once(args) -> int:
     for game in games:
         resolve_appid(game, manual, hydra_log, cache, online=args.online)
         game.emu_names, _note = identify_emulator(game.path)
-        game.emu_hint = check_steam_dlls(game.path)
+        game.emu_hint = check_steam_dlls(game.path, game.emu_dir)
 
     say(f"Игр в индексе: {len(games)} "
         f"(со схемой достижений: {sum(1 for g in games if g.has_schema)})")
@@ -1964,14 +2056,14 @@ def run_once(args) -> int:
         state["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
         save_state(state)
         if args.online and cache:
-            CACHE_FILE.write_text(
+            write_text_atomic(
+                CACHE_FILE,
                 json.dumps(cache, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
-                encoding="utf-8",
             )
         if own_cache:
-            OWN_CACHE_FILE.write_text(
+            write_text_atomic(
+                OWN_CACHE_FILE,
                 json.dumps(own_cache, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
-                encoding="utf-8",
             )
 
     REPORT_FILE.write_text("\n".join(report) + "\n", encoding="utf-8")

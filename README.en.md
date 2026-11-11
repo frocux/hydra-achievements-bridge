@@ -6,6 +6,10 @@
 
 **This isn't just a bridge for a couple of emulators — it knows pretty much all of them.**
 
+**A full pass takes about a second.** Real run: 4 bridges at once (The Henry Stickmin
+Collection — 8 achievements, Nodebuster — 13, Click the Button — 9, Moon Sweepers — 8),
+done in 1 second. It runs in the background while you play.
+
 **Hydra Launcher only looks for achievement files at a fixed set of paths. This script
 finds them anywhere else on your PC and copies them where Hydra is guaranteed to read them.**
 
@@ -59,6 +63,10 @@ belong to, and copies them where Hydra will definitely see them.
   binary `stats.bin`, the GreenLuma registry.
 - **Unknown formats still work**: any file that looks like achievement data gets run
   through every parser in turn, so new emulators usually just work with no code changes.
+- **Any encoding**: UTF-8, cp1251, UTF-16, with or without a BOM. Old INI files from
+  Russian repacks read just fine.
+- **Safe writes**: files are written to a temp copy and swapped in one move (`os.replace`),
+  so Hydra never sees a half-written file — and the previous content stays next to it as `.bak`.
 - **Lost appid recovery**: achievements in a nameless folder (like `GSE Saves\0`) are
   matched against each game's achievement schema and routed to the right game.
 - **Emulator detection**: reports which emulator a game folder uses, and warns when the
@@ -92,6 +100,7 @@ manual setup, a window full of buttons you have to keep open. This one goes the 
 | Windows registry | rarely | GreenLuma + a general `HKCU\Software` sweep |
 | Setup | drag a folder into a window, run as admin | one line in `roots.txt`, or nothing at all |
 | How it runs | while its window is open | quietly from startup, once a minute |
+| Antivirus | an `.exe` Defender sometimes eats | a plain `.py` script — nothing to flag |
 
 And it never touches your game folders and never needs admin rights.
 

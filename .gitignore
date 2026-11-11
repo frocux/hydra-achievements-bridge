@@ -6,6 +6,10 @@ bridge.lock
 steam-cache.json
 local-saves-cache.json
 
+# Резервные копии и недописанные файлы: их делает сам скрипт
+*.bak
+*.tmp
+
 # Свои списки папок и привязок: у каждого они свои.
 roots.txt
 games.txt
