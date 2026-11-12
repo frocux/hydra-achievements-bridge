@@ -16,7 +16,7 @@ done in 1 second. It runs in the background while you play.
 **Hydra Launcher only looks for achievement files at a fixed set of paths. This script
 finds them anywhere else on your PC and copies them where Hydra is guaranteed to read them.**
 
-`Python 3.8+` · no third-party libraries · Windows
+`Python 3.9+` · no third-party libraries · Windows
 
 > Heads up: the script talks to you in Russian. The code is plain Python and
 > `--help` lists every option, but the console output and comments are Russian.
@@ -53,6 +53,16 @@ launcher. Three common cases:
 
 The script handles all three: it finds the achievements, works out which game they
 belong to, and copies them where Hydra will definitely see them.
+
+There's a fourth case where nothing but a bridge can help. We went and read Hydra's
+source: for some emulators it has **no search paths at all**. The list it builds for
+3DM, ALI213 and UserStats comes back empty — Hydra physically cannot find those
+achievements, no matter how neatly the emulator files them. No launcher update will
+change that either. If your game uses one of those, a bridge isn't a convenience,
+it's the only road there is.
+
+Mind you — even then the achievements have to exist on disk first. More about that
+further down, in "What it can't do".
 
 ---
 
@@ -101,6 +111,10 @@ Popped in-game, and the bridge picked it up along with the rest.
   compressed `.sav` files — the script unpacks them and pulls the achievements out.
 - **Windows registry**: GreenLuma (which keeps progress in the registry) plus a general
   sweep of `HKCU\Software`, for any emulator that writes there.
+- **Tests over every format**: the `tests` folder feeds each parser a sample of every
+  known format and checks what comes back out. Run `run-tests.bat` (or
+  `python -m unittest discover -s tests -t .`), no dependencies, nothing touched outside
+  a temp folder.
 
 Output goes to `%APPDATA%\GSE Saves\<appid>\achievements.json` in Goldberg format — the
 one place Hydra reads for *any* crack. Existing foreign files are never overwritten; if
@@ -112,11 +126,13 @@ that slot is taken, the script falls back to
 ## How it's different from other bridges
 
 Tools like this are rare, and almost all of them are narrow: one or two emulators,
-manual setup, a window full of buttons you have to keep open. This one goes the other way.
+a manual routine — run it as admin, drag the game folder onto its window, pick an
+option from the menu, keep the window open. This one goes the other way.
 
 | | Typical bridges | This one |
 |---|---|---|
 | Emulators | one or two (usually RUNE and Goldberg) | 19 emulators, ~70 spots, every known format |
+| Emulators Hydra can't see at all | nothing to be done | 3DM, ALI213, UserStats — Hydra has no paths for them, the bridge is the only way |
 | Unknown format | ignored | a sniffer runs every parser on the file |
 | Lost appid | achievements just aren't found | routed by matching names against game schemas |
 | Game's own achievement tracking | usually no | Godot and Adobe AIR saves |
@@ -131,7 +147,7 @@ And it never touches your game folders and never needs admin rights.
 
 ## Install and run
 
-1. Install Python 3.8+ (tick **Add Python to PATH**).
+1. Install Python 3.9+ (tick **Add Python to PATH**).
 2. Put this folder anywhere you like, e.g. `C:\Tools\hydra-achievements-bridge`.
 3. Open `roots.txt` and list your game folders, one per line. The two most common
    ones (`C:\Games` and `D:\Games`) are already built into the script, so if your
@@ -224,6 +240,46 @@ Read `report.txt`. It'll say one of these:
 
 ---
 
+## What it can't do
+
+So we don't oversell this thing. The bridge moves achievements that already exist on
+disk. It can't conjure them up, and it never reaches into your game folders.
+
+**If the game never handed the achievement over, there's nothing to move.** Real case
+from this very PC: Hollow Knight under RUNE. The file Hydra reads —
+`C:\Users\Public\Documents\Steam\RUNE\367520\achievements.ini` — is right there, and
+inside it says `Count=0`. Our diagnosis: the repack came without RUNE's achievement
+schema (`steam_settings\achievements.json`), and without that schema RUNE doesn't know
+the game's achievement list at all, so it wrote none of them down.
+Hydra opens that very file, finds nothing, and
+shows an empty page. The bridge opens it too and finds exactly the same nothing —
+there is physically no data to carry across.
+
+The fix lives on the game's side: give it a proper achievement schema, or switch the
+build to Goldberg, which pulls the achievement list out of the game itself. Both mean
+digging around in the game folder, so the bridge won't do it behind your back — it
+never writes there at all.
+
+**Some emulators hold achievements in memory and only flush them to disk later**, or
+when the game exits. RUNE is one of those. Play, quit the game, let the bridge take a
+pass — now they're in Hydra.
+
+**Progress that lives on a server can't be copied.** A few builds keep achievements
+online. Locally there's nothing to pick up.
+
+**Anonymous names stay anonymous.** SmartSteamEmu keeps not names but their CRC32, so
+the report shows entries like `crc:a1b2c3d4`. They do get carried across, but there's
+no way to match them against the game's real achievements — so don't count on Hydra
+showing those nicely.
+
+**Windows only** — every one of those locations is a Windows path.
+
+**And it won't repair a broken emulator.** If your antivirus ate the cracked library,
+the most the bridge can do is pull achievements out of the game's own save file — if
+the game keeps one. Reinstalling the emulator is a separate job.
+
+---
+
 ## Make it yours
 
 The licence is **MIT** — take it and do whatever you want: change it, cut bits out,
@@ -245,6 +301,7 @@ Where things live:
 | Change how often it checks | the `--watch` flag, or the number in the startup shortcut |
 | Add my game folders and bindings | `roots.txt`, `games.txt` |
 | Games that track achievements themselves | `local-saves.json` |
+| Check I didn't break a format | `run-tests.bat` — a test per format, samples in `tests/samples` |
 
 Comments in the code are Russian, and every table is labelled in words — a beginner can
 follow it. Fork it, add your own emulators, send patches: the tables exist for exactly
@@ -270,6 +327,8 @@ local-saves-cache.json  cache of parsed game files
 check.bat, run.bat, watch.bat, autostart-*.bat   Windows launchers
 autostart-on.ps1, autostart-off.ps1              autostart plumbing
 roots.example.txt, games.example.txt             config templates
+run-tests.bat                                    runs the test suite
+tests/                                           tests and the sample files they use
 media/                                           images and video for this README
 ```
 

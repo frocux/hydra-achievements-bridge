@@ -1,0 +1,8 @@
+{
+  "_comment": "Образец: achievements.json Goldberg / GSE. Открытые достижения лежат с earned=true и временем, закрытые — с earned=false. Служебные ключи вроде Count достижением не считаются, даже если помечены earned.",
+
+  "ACH_JSON_ONE": { "earned": true, "earned_time": 1700000500 },
+  "ACH_JSON_TWO": { "earned": false, "earned_time": 0 },
+  "ACH_JSON_THREE": { "earned": true, "earned_time": 0 },
+  "Count": { "earned": true, "earned_time": 1700000000 }
+}
