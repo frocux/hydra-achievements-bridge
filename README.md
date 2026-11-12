@@ -111,10 +111,12 @@ Popped in-game, and the bridge picked it up along with the rest.
   compressed `.sav` files — the script unpacks them and pulls the achievements out.
 - **Windows registry**: GreenLuma (which keeps progress in the registry) plus a general
   sweep of `HKCU\Software`, for any emulator that writes there.
-- **Tests over every format**: the `tests` folder feeds each parser a sample of every
-  known format and checks what comes back out. Run `run-tests.bat` (or
-  `python -m unittest discover -s tests -t .`), no dependencies, nothing touched outside
-  a temp folder.
+- **Tests on the parsers**: `tests` holds a sample file for each main format — every INI
+  flavour, Goldberg/EMPRESS JSON, SmartSteamEmu's binary `stats.bin` — and checks exactly
+  what comes back out of each one, 49 checks in all. Run `run-tests.bat` (or
+  `python -m unittest discover -s tests -t .`): no dependencies, nothing written outside
+  a temp folder. Being honest: the GreenLuma registry and the Adobe AIR saves have no
+  tests yet, so those paths are covered by nothing but a careful read.
 
 Output goes to `%APPDATA%\GSE Saves\<appid>\achievements.json` in Goldberg format — the
 one place Hydra reads for *any* crack. Existing foreign files are never overwritten; if
@@ -301,7 +303,7 @@ Where things live:
 | Change how often it checks | the `--watch` flag, or the number in the startup shortcut |
 | Add my game folders and bindings | `roots.txt`, `games.txt` |
 | Games that track achievements themselves | `local-saves.json` |
-| Check I didn't break a format | `run-tests.bat` — a test per format, samples in `tests/samples` |
+| Check I didn't break a format | `run-tests.bat` — a test per main format, samples in `tests/samples` |
 
 Comments in the code are Russian, and every table is labelled in words — a beginner can
 follow it. Fork it, add your own emulators, send patches: the tables exist for exactly
