@@ -33,6 +33,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -314,6 +315,155 @@ class WritesTest(unittest.TestCase):
         # на диске перевод строки записан так, как принято в системе
         self.assertEqual(bridge.read_text(target),
                          "Достижений перенесено: 13" + os.linesep)
+
+    def test_busy_file_is_retried(self):
+        """Игра держала файл открытым — со второй попытки запись проходит."""
+        target = self.tmp / "achievements.json"
+        real_replace = os.replace
+        calls = {"n": 0}
+
+        def flaky(src, dst):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise PermissionError(13, "файл занят")
+            real_replace(src, dst)
+
+        with mock.patch.object(bridge.os, "replace", side_effect=flaky), \
+                mock.patch.object(bridge, "WRITE_RETRY_PAUSE", 0):
+            bridge.write_text_atomic(target, "готово")
+
+        self.assertEqual(target.read_text(encoding="utf-8"), "готово")
+        self.assertEqual(calls["n"], 3)
+
+    def test_busy_file_gives_up_and_cleans_the_tmp(self):
+        target = self.tmp / "achievements.json"
+        with mock.patch.object(bridge.os, "replace",
+                               side_effect=PermissionError(13, "файл занят")), \
+                mock.patch.object(bridge, "WRITE_RETRY_PAUSE", 0):
+            with self.assertRaises(OSError):
+                bridge.write_text_atomic(target, "не выйдет")
+        self.assertFalse(target.with_name("achievements.json.tmp").exists())
+
+    def test_bridge_file_reports_busy_instead_of_crashing(self):
+        """Не записалось — отчёт скажет об этом, а прогон не упадёт."""
+        ours: set[str] = set()
+        with mock.patch.object(bridge, "BRIDGE_DIR", self.tmp), \
+                mock.patch.object(bridge, "APPDATA", self.tmp / "appdata"), \
+                mock.patch.object(bridge, "write_text_atomic",
+                                  side_effect=PermissionError(13, "файл занят")):
+            target, added, note = bridge.write_bridge_file(
+                "367520", {"ACH_ONE": WHEN}, ours, dry_run=False)
+        self.assertEqual(added, 0)
+        self.assertIn("занят", note)
+        self.assertEqual(target, self.tmp / "367520" / "achievements.json")
+
+
+class SteamTest(unittest.TestCase):
+    """Steam сама знает, где её библиотеки и какой папке какой номер.
+
+    Оттуда мост берёт две вещи даром: папки steamapps\\common (их не надо
+    вписывать в roots.txt) и номера игр из appmanifest_*.acf.
+    """
+
+    def test_parse_library_folders_new_format(self):
+        # в самом vdf обратный слэш задвоен — так и пишем в образце
+        text = ('"libraryfolders"\n{\n'
+                '\t"0"\n\t{\n\t\t"path"\t\t"C:\\\\Program Files (x86)\\\\Steam"\n\t}\n'
+                '\t"1"\n\t{\n\t\t"path"\t\t"D:\\\\SteamLibrary"\n\t}\n}\n')
+        self.assertEqual(
+            bridge.parse_library_folders(text),
+            [Path(r"C:\Program Files (x86)\Steam"), Path(r"D:\SteamLibrary")])
+
+    def test_parse_library_folders_old_format(self):
+        text = ('"LibraryFolders"\n{\n'
+                '\t"TimeNextStatsReport"\t\t"1700000000"\n'
+                '\t"ContentStatsID"\t\t"12345"\n'
+                '\t"1"\t\t"D:\\\\Games"\n}\n')
+        self.assertEqual(bridge.parse_library_folders(text), [Path(r"D:\Games")])
+
+    def test_parse_library_folders_ignores_repeats(self):
+        text = ('"0" "D:\\\\Steam"\n"1" "d:\\\\steam"\n')
+        self.assertEqual(len(bridge.parse_library_folders(text)), 1)
+
+    def test_parse_acf(self):
+        text = ('"AppState"\n{\n\t"appid"\t\t"367520"\n'
+                '\t"name"\t\t"Hollow Knight"\n'
+                '\t"installdir"\t\t"Hollow Knight"\n}\n')
+        self.assertEqual(bridge.parse_acf(text), ("367520", "Hollow Knight"))
+
+    def test_parse_acf_without_fields(self):
+        self.assertEqual(bridge.parse_acf('"AppState"\n{\n}\n'), ("", ""))
+
+    def test_manifest_map_finds_appid_by_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            steamapps = Path(tmp) / "steamapps"
+            steamapps.mkdir()
+            (steamapps / "appmanifest_367520.acf").write_text(
+                '"AppState"\n{\n\t"appid"\t\t"367520"\n'
+                '\t"installdir"\t\t"hollow knight"\n}\n',
+                encoding="utf-8")
+            found = bridge.steam_manifest_map(libraries=[Path(tmp)])
+        self.assertEqual(found.get("hollowknight"), "367520")
+
+    def test_manifest_map_skips_dummy_and_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            steamapps = Path(tmp) / "steamapps"
+            steamapps.mkdir()
+            (steamapps / "appmanifest_480.acf").write_text(
+                '"AppState"\n{\n\t"appid"\t\t"480"\n'
+                '\t"installdir"\t\t"Spacewar"\n}\n', encoding="utf-8")
+            (steamapps / "appmanifest_1.acf").write_text(
+                '"AppState"\n{\n\t"installdir"\t\t"Broken"\n}\n', encoding="utf-8")
+            found = bridge.steam_manifest_map(libraries=[Path(tmp)])
+        self.assertEqual(found, {})
+
+    def test_resolve_appid_from_steam_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game_dir = Path(tmp) / "Some Game"
+            game_dir.mkdir()
+            game = bridge.GameInfo(game_dir, set())
+            bridge.resolve_appid(game, {}, {}, {}, online=False,
+                                 steam_map={"somegame": "123456"})
+        self.assertEqual(game.appid, "123456")
+        self.assertEqual(game.appid_note, "манифест Steam")
+
+    def test_steam_appid_txt_beats_the_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game_dir = Path(tmp) / "Some Game"
+            (game_dir / "steam_settings").mkdir(parents=True)
+            (game_dir / "steam_settings" / "steam_appid.txt").write_text(
+                "588650", encoding="utf-8")
+            game = bridge.GameInfo(game_dir, set())
+            bridge.resolve_appid(game, {}, {}, {}, online=False,
+                                 steam_map={"somegame": "123456"})
+        self.assertEqual(game.appid, "588650")
+        self.assertEqual(game.appid_note, "steam_appid.txt")
+
+
+class IgnoreTest(unittest.TestCase):
+    """ignore.txt: маска на строку, совпадение — кусок пути без регистра."""
+
+    def test_mask_matches_part_of_path(self):
+        masks = [r"d:\pirate games\old"]
+        self.assertTrue(bridge.is_ignored(r"D:\Pirate Games\Old Copy\Game", masks))
+        self.assertFalse(bridge.is_ignored(r"D:\Pirate Games\New\Game", masks))
+
+    def test_slashes_and_none_and_empty(self):
+        self.assertTrue(bridge.is_ignored("D:/Games/Bad/Game", ["bad"]))
+        self.assertFalse(bridge.is_ignored(None, ["bad"]))
+        self.assertFalse(bridge.is_ignored("D:/Games/Good", []))
+        self.assertFalse(bridge.is_ignored("D:/Games/Good", [""]))
+
+    def test_load_ignore_masks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ignore.txt"
+            path.write_text('# это пояснение, его не берём\n'
+                            '"D:\\Pirate Games\\Old"  # старая копия сборки\n'
+                            '\n'
+                            'Games/Bad\n', encoding="utf-8")
+            with mock.patch.object(bridge, "IGNORE_FILE", path):
+                self.assertEqual(bridge.load_ignore_masks(),
+                                 [r"d:\pirate games\old", "games/bad"])
 
 
 class SmallHelpersTest(unittest.TestCase):

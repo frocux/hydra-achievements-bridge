@@ -13,6 +13,7 @@ local-saves-cache.json
 # Свои списки папок и привязок: у каждого они свои.
 roots.txt
 games.txt
+ignore.txt
 local-saves.json
 
 # Мелочи Python

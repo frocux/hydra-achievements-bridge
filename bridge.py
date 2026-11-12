@@ -48,8 +48,13 @@ Hydra ищет файлы достижений строго по определ�
 ------
     python bridge.py            обычный прогон
     python bridge.py --dry-run  посмотреть, ничего не писать
+    python bridge.py --doctor   осмотреть компьютер и показать, что мост видит
     python bridge.py --watch    повторять раз в 30 секунд
     python bridge.py --help     все ключи
+
+Что не трогать, перечисляется в ignore.txt (по маске на строку).
+Папки библиотек Steam и номера игр из их манифестов мост находит сам;
+отключается ключом --no-auto.
 
 Подробности — в README.md рядом с этим файлом.
 """
@@ -63,6 +68,7 @@ import re
 import struct
 import sys
 import time
+import traceback
 import urllib.parse
 import urllib.request
 import zlib
@@ -105,17 +111,31 @@ REPORT_FILE = HERE / "report.txt"         # отчёт последнего пр
 LOCK_FILE = HERE / "bridge.lock"          # занято, пока работает слежение
 MANUAL_FILE = HERE / "games.txt"          # ручные привязки «папка = номер игры»
 ROOTS_FILE = HERE / "roots.txt"
+IGNORE_FILE = HERE / "ignore.txt"         # что не трогать: маски путей
 OWN_MAP_FILE = HERE / "local-saves.json"  # ручные карты для игр со своим учётом
 OWN_CACHE_FILE = HERE / "local-saves-cache.json"  # кэш разбора файлов игр
 
 # Через сколько секунд кэш обхода (см. PathCache) выбрасывается и обход
-# делается начисто. Страховка: даже если время изменения папки где-то
-# соврёт, раз в две минуты всё равно находится всё.
-FULL_EVERY_DEFAULT = 120
+# делается начисто. Кэш и так проверяет себя сам: у папки спрашивается
+# время изменения, у файла — размер и время, так что забывать всё начисто
+# нужно только от редкого случая «файл переписали, а размер и время те же».
+# Поэтому страховка редкая: раз в десять минут, а не раз в две — иначе
+# каждые две минуты диск заново перечитывал тысячу с лишним папок.
+FULL_EVERY_DEFAULT = 600
 
 MAX_DEPTH = 5            # на сколько папок вглубь роемся в поисках игр
 MAX_SNIFF_SIZE = 8 << 20   # файлы больше 8 МБ на разбор не берём
 MAX_MAP_FILE_SIZE = 400 << 20  # но файлы игр для карты достижений — до 400 МБ
+
+# Запись файла: если игра в этот момент держит его открытым, Windows ответит
+# «отказано в доступе». Пауза и повтор обычно решают дело — игра файл отпускает.
+WRITE_RETRIES = 3         # сколько всего попыток записи
+WRITE_RETRY_PAUSE = 0.2   # пауза перед повтором, умножается на номер попытки
+
+# state.json переписывается в --watch каждые полминуты, хотя меняется в нём
+# толком только отметка времени. Поэтому: если своих файлов не прибавилось,
+# трогаем его не чаще раза в STATE_HEARTBEAT секунд.
+STATE_HEARTBEAT = 300
 
 SKIP_DIRS = {
     "$recycle.bin", "system volume information", "windowsapps", "winsxs",
@@ -186,6 +206,11 @@ def write_text_atomic(path: Path, text: str) -> None:
     (os.replace), а не по кусочкам — Hydra в этот момент не увидит
     половинку. Второй: прежнее содержимое остаётся рядом как «.bak»,
     так что вернуть всё назад можно руками, без нас.
+
+    Если файл занят другой программой (игра ещё дописывает своё сохранение),
+    Windows откажет в записи. Тогда ждём чуть-чуть и пробуем ещё раз —
+    обычно со второй-третьей попытки всё проходит. Не вышло — поднимаем
+    ошибку наверх, там её покажут в отчёте.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -194,8 +219,37 @@ def write_text_atomic(path: Path, text: str) -> None:
         except OSError:
             pass                      # копия — не повод не записать главное
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    last_error: OSError | None = None
+    for attempt in range(WRITE_RETRIES):
+        try:
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, path)
+            return
+        except OSError as error:
+            last_error = error
+            time.sleep(WRITE_RETRY_PAUSE * (attempt + 1))
+    try:
+        tmp.unlink()                  # временный файл за собой уберём
+    except OSError:
+        pass
+    if last_error is not None:
+        raise last_error
+
+
+def write_text_if_changed(path: Path, text: str) -> bool:
+    """Пишет файл, только если содержимое отличается от того, что на диске.
+
+    Нужно для служебных файлов, которые пересобираются каждый проход:
+    по большей части они не меняются, а каждая запись — это работа диску
+    и лишняя резервная копия рядом. Возвращает True, если записали.
+    """
+    try:
+        if path.exists() and read_text(path) == text:
+            return False
+    except OSError:
+        pass
+    write_text_atomic(path, text)
+    return True
 
 
 def read_bytes(path: Path, limit: int = MAX_SNIFF_SIZE) -> bytes:
@@ -245,6 +299,31 @@ def clean_title(text) -> str:
 def norm(text) -> str:
     """Приводит строку к виду для сравнения: без пробелов, знаков и регистра."""
     return re.sub(r"[^0-9a-zа-яё]+", "", str(text).lower())
+
+
+# ────────────────────────────── ignore.txt ──────────────────────────────
+#
+# Бывает, что какую-то папку трогать не нужно: там старая копия сборки,
+# чужая игра или просто хлам. Тогда её маску — кусок пути без учёта
+# регистра — пишут в ignore.txt, и мост проходит мимо.
+
+
+def load_ignore_masks() -> list[str]:
+    """Маски из ignore.txt: по одной в строке, «#» — начало пояснения."""
+    masks: list[str] = []
+    for line in read_text(IGNORE_FILE).splitlines():
+        line = line.split("#")[0].strip().strip('"')
+        if line:
+            masks.append(line.lower())
+    return masks
+
+
+def is_ignored(text, masks: list[str]) -> bool:
+    """Есть ли маска внутри пути (или названия) — без учёта регистра."""
+    if not masks or text is None:
+        return False
+    low = str(text).replace("/", "\\").lower()
+    return any(mask and mask in low for mask in masks)
 
 
 def plural(count: int, one: str, few: str, many: str) -> str:
@@ -980,10 +1059,32 @@ def candidate_files(base: Path, deep: int = DEEP_LEVELS):
     for here, _dirnames, filenames in iter_dirs(base, deep):
         for filename in filenames:
             low = filename.lower()
-            if Path(low).suffix in MEDIA_SUFFIXES:
+            # os.path.splitext вместо Path(low).suffix: за прогон здесь
+            # перебирается около двадцати тысяч имён, и каждое Path — это
+            # лишний разбор строки на части.
+            if os.path.splitext(low)[1] in MEDIA_SUFFIXES:
                 continue
-            if low in ACH_FILE_NAMES or low in EMU_INI_NAMES or ACH_FILE_RE.search(low):
+            if low in ACH_FILE_NAMES or low in EMU_INI_NAMES:
                 yield here / filename
+            # Каждая ветка регэкспа требует в имени «ach», «stat» или
+            # «progress» — остальные имена можно до него не доводить.
+            elif (("ach" in low or "stat" in low or "progress" in low)
+                  and ACH_FILE_RE.search(low)):
+                yield here / filename
+
+
+# Развёрнутые шаблоны за один прогон. Одно и то же спрашивается по несколько
+# раз: шаблоны без {GAME} дают одинаковый ответ для папки игры и папки
+# эмулятора, а когда эти папки совпадают, повторяется и всё остальное.
+# Ключ — шаблон, номер игры и папка; папка входит в ключ, только если шаблон
+# её вообще использует. Чистится в начале каждого прогона: на диске всё
+# могло поменяться.
+_EXPANDED: dict[tuple[str, str, str], list[Path]] = {}
+
+
+def forget_expansions() -> None:
+    """Забыть развёрнутые шаблоны — новый прогон смотрит на диск заново."""
+    _EXPANDED.clear()
 
 
 def expand_template(tpl: str, appid: str, game_dir: Path | None) -> list[Path]:
@@ -992,7 +1093,19 @@ def expand_template(tpl: str, appid: str, game_dir: Path | None) -> list[Path]:
     Звёздочку разворачиваем руками, а не через glob: в названиях папок часто
     встречаются квадратные скобки (метки репаков вроде «[by ...]»), а glob
     считает их спецсимволом и ничего не находит.
+
+    Повторный вопрос в том же прогоне отдаём из памяти (см. _EXPANDED).
     """
+    key = (tpl, appid, str(game_dir) if "{GAME}" in tpl else "")
+    remembered = _EXPANDED.get(key)
+    if remembered is not None:
+        return remembered
+    found = _expand_template(tpl, appid, game_dir)
+    _EXPANDED[key] = found
+    return found
+
+
+def _expand_template(tpl: str, appid: str, game_dir: Path | None) -> list[Path]:
     if "{APPID}" in tpl and not appid:
         return []
     text = (tpl
@@ -1047,36 +1160,46 @@ EMU_MARKERS: list[tuple[str, tuple[str, ...]]] = [
     ("Goldberg (Golden) / SteamStub", ("steam_api64.org", "steam_api.org")),
 ]
 
+# «имя файла → название эмулятора»: чтобы по одному взгляду на список
+# файлов в папке понимать, чей это маркер, не перебирая все эмуляторы.
+EMU_MARKER_LABEL = {marker: label
+                    for label, markers in EMU_MARKERS
+                    for marker in markers}
 
-def identify_emulator(game_dir: Path) -> tuple[list[str], str]:
-    """Смотрит на файлы в папке игры и говорит, какой там эмулятор и что читать.
 
-    Возвращает (список названий, откуда номер игры).
+def identify_emulator(game_dir: Path,
+                      emu_dir: Path | None = None) -> tuple[list[str], str]:
+    """Смотрит на файлы в папке игры и говорит, какой там эмулятор.
+
+    Возвращает (список названий, пояснение).
     """
     names: list[str] = []
-    if not game_dir.is_dir():
-        return names, ""
-    try:
-        entries = {p.name.lower() for p in game_dir.iterdir()}
-    except OSError:
-        return names, ""
-
-    for label, markers in EMU_MARKERS:
-        if any(marker in entries for marker in markers):
-            if label not in names:
+    # Список папки берём из кэша обхода: его всё равно уже читали, а лишний
+    # iterdir — это ещё одно обращение к диску на каждую игру.
+    bases = [game_dir]
+    if emu_dir is not None and emu_dir != game_dir:
+        bases.append(emu_dir)
+    for base in bases:
+        record = CACHE.list_dir(base)
+        if record is None:
+            continue
+        entries = CACHE.names(record)
+        for label, markers in EMU_MARKERS:
+            if any(marker in entries for marker in markers) and label not in names:
                 names.append(label)
 
-    # Конфиги эмулятора могут лежать и в подпапке
+    # Конфиги эмулятора могут лежать и в другой подпапке
     if not names:
-        for here, _dirnames, filenames in iter_dirs(game_dir, 3):
-            low = {f.lower() for f in filenames}
-            for label, markers in EMU_MARKERS:
-                if any(marker in low for marker in markers) and label not in names:
+        for _here, dirnames, filenames in iter_dirs(game_dir, 3):
+            hits = {EMU_MARKER_LABEL[name.lower()]
+                    for name in (*dirnames, *filenames)
+                    if name.lower() in EMU_MARKER_LABEL}
+            # порядок тот же, что в EMU_MARKERS, — чтобы отчёт не менялся
+            for label, _markers in EMU_MARKERS:
+                if label in hits and label not in names:
                     names.append(label)
 
-    # Заодно попробуем понять, какой номер игры у этой сборки
-    appid, note = find_appid_near(game_dir)
-    return names, (f"{note} → {appid}" if appid else "")
+    return names, ""
 
 
 # Слова, по которым узнаётся живой эмулятор внутри steam_api.dll
@@ -1103,21 +1226,23 @@ def check_steam_dlls(game_dir: Path, emu_dir: Path | None = None) -> str:
     «Valve внутри» само по себе ничего не значит: смотрим, есть ли рядом
     хоть какие-то собственные файлы эмулятора.
     """
-    for base in (game_dir, emu_dir):
-        if base is None or not CACHE.is_dir(base):
-            continue
-        for here, _dirnames, filenames in iter_dirs(base, 3):
-            low = {f.lower() for f in filenames}
-            for _label, markers in EMU_MARKERS:
-                if any(marker in low for marker in markers):
-                    return ""       # эмулятор на месте, ругаться не на что
-
     dlls: list[Path] = []
-    for here, _dirnames, filenames in iter_dirs(game_dir, 3):
-        for filename in filenames:
-            low = filename.lower()
-            if low.endswith(".dll") and low.startswith(("steam_api", "steamclient")):
-                dlls.append(here / filename)
+    # Один обход вместо двух: заодно ищем и маркеры эмулятора, и его
+    # библиотеки. Раньше папка игры обходилась дважды — сначала ради
+    # маркеров, потом ради dll.
+    bases = [game_dir] if emu_dir is None or emu_dir == game_dir else [game_dir, emu_dir]
+    for base in bases:
+        if not CACHE.is_dir(base):
+            continue
+        collect_dlls = base == game_dir      # сами библиотеки ищем только тут
+        for here, _dirnames, filenames in iter_dirs(base, 3):
+            for filename in filenames:
+                low = filename.lower()
+                if low in EMU_MARKER_LABEL:
+                    return ""       # эмулятор на месте, ругаться не на что
+                if (collect_dlls and low.endswith(".dll")
+                        and low.startswith(("steam_api", "steamclient"))):
+                    dlls.append(here / filename)
     if not dlls:
         return ""
 
@@ -1171,6 +1296,37 @@ class GameInfo:
         return self.path.name
 
 
+# Файлы и папки, по которым видно, что здесь стоит игра с эмулятором.
+GAME_MARKERS = frozenset({
+    "steam_settings", "steam_emu.ini", "sovereign.ini", "smartsteamemu.ini",
+    "steam_api64.dll", "steam_api.dll",
+})
+
+# Схемы достижений (steam_settings\achievements.json) меняются редко, а весят
+# порой сотни килобайт — помним разобранный список имён по отпечатку файла.
+_SCHEMA_CACHE: dict[str, tuple[tuple[int, int] | None, set[str] | None]] = {}
+
+
+def load_schema_names(candidate: Path) -> set[str] | None:
+    """Читает имена достижений из steam_settings\\achievements.json с кэшем."""
+    if not CACHE.is_file(candidate):
+        return None
+    key = os.path.normcase(str(candidate))
+    mark = CACHE.fingerprint(candidate)
+    remembered = _SCHEMA_CACHE.get(key)
+    if remembered is not None and remembered[0] == mark:
+        return remembered[1]
+    parsed = read_json(candidate)
+    schema_names: set[str] | None = None
+    if isinstance(parsed, list):
+        names = {norm(item.get("name"))
+                 for item in parsed
+                 if isinstance(item, dict) and item.get("name")}
+        schema_names = names or None
+    _SCHEMA_CACHE[key] = (mark, schema_names)
+    return schema_names
+
+
 def scan_games(roots: list[Path]) -> list[GameInfo]:
     """Находит папки игр и, если повезёт, схемы их достижений.
 
@@ -1207,36 +1363,27 @@ def scan_games(roots: list[Path]) -> list[GameInfo]:
             name = root.name.lower()
             if name.endswith("_data") or name in ENGINE_DIR_NAMES:
                 continue
-            try:
-                has_exe = any(p.suffix.lower() == ".exe" for p in root.iterdir()
-                              if p.is_file())
-                has_data = any(p.is_dir() and p.name.lower().endswith("_data")
-                               for p in root.iterdir())
-            except OSError:
+            record = CACHE.list_dir(root)
+            if record is None:
                 return None
+            has_exe = any(f.lower().endswith(".exe") for f in record[3])
+            has_data = any(d.lower().endswith("_data")
+                           for d in (*record[1], *record[2]))
             if has_exe or has_data:
                 return root
             return None
         return None
 
     for root in roots:
-        for here, _dirnames, filenames in iter_dirs(root):
-            lowers = {f.lower() for f in filenames}
-            if not any(name in lowers for name in ("steam_settings", "steam_emu.ini",
-                                                   "sovereign.ini", "smartsteamemu.ini",
-                                                   "steam_api64.dll", "steam_api.dll")):
+        for here, dirnames, filenames in iter_dirs(root):
+            # Сверяем имена напрямую, без множества на каждую папку: множество
+            # собиралось ради шести имён, а папок в обходе — тысячи.
+            if not (any(f.lower() in GAME_MARKERS for f in filenames)
+                    or any(d.lower() == "steam_settings" for d in dirnames)):
                 continue
-            schema_names: set[str] | None = None
-            for candidate in (here / "steam_settings" / "achievements.json",
-                              here / "steam_settings" / "steam_appid.txt"):
-                if candidate.name != "achievements.json":
-                    continue
-                parsed = read_json(candidate)
-                if isinstance(parsed, list):
-                    names = {norm(item.get("name"))
-                             for item in parsed
-                             if isinstance(item, dict) and item.get("name")}
-                    schema_names = names or None
+            schema_names = load_schema_names(
+                here / "steam_settings" / "achievements.json"
+            )
             # «x86_64», «Plugins» и подобное — это внутренности движка, а не
             # папка игры: там лежат только копии steam_api.dll. Но игру всё
             # равно надо взять на заметку — иначе она выпадет из отчёта.
@@ -1280,6 +1427,124 @@ def load_hydra_log_map() -> dict[str, str]:
         # сравнение по «хвосту» пути: игра могла быть перенесена в другую папку
         tail = "\\".join(Path(folder).parts[-3:]).lower()
         result.setdefault(tail, appid)
+    return result
+
+
+# ──────────────── библиотеки Steam: где игры и их номера ────────────────
+#
+# Steam сам ведёт список своих библиотек (libraryfolders.vdf) и держит на
+# каждую установленную игру маленький манифест appmanifest_<номер>.acf.
+# Оттуда бесплатно берутся две вещи: папки «steamapps\common» — их не надо
+# вписывать в roots.txt руками — и номера игр по названию папки, даже если
+# эмулятор в сборке не оставил рядом никакого файла с номером.
+
+_MANIFEST_CACHE: dict[str, list] = {}   # файл манифеста → [отпечаток, номер, папка]
+
+
+def steam_install_path() -> Path | None:
+    """Где установлен Steam: сначала реестр, потом обычное место."""
+    candidates: list[Path] = []
+    if winreg is not None:
+        for hive, key_path, value_name in (
+                (winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath"),
+                (winreg.HKEY_LOCAL_MACHINE,
+                 r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath"),
+                (winreg.HKEY_LOCAL_MACHINE,
+                 r"SOFTWARE\Valve\Steam", "InstallPath")):
+            try:
+                with winreg.OpenKey(hive, key_path, 0, winreg.KEY_READ) as key:
+                    value, _kind = winreg.QueryValueEx(key, value_name)
+            except OSError:
+                continue
+            if value:
+                candidates.append(Path(str(value)))
+    candidates.append(Path(r"C:\Program Files (x86)\Steam"))
+    for candidate in candidates:
+        if (candidate / "steamapps").is_dir():
+            return candidate
+    return None
+
+
+def parse_library_folders(text: str) -> list[Path]:
+    """Пути библиотек Steam из libraryfolders.vdf.
+
+    Новый формат пишет `"path" "D:\\\\SteamLibrary"`, старый — `"1" "D:\\\\..."`.
+    В самом файле обратный слэш задвоен; здесь мы его раздваиваем обратно.
+    """
+    found: list[Path] = []
+    seen: set[str] = set()
+
+    def take(raw: str) -> None:
+        path = raw.replace('\\\\', '\\')
+        key = os.path.normcase(path)
+        if path and key not in seen:
+            seen.add(key)
+            found.append(Path(path))
+
+    for match in re.finditer(r'"path"\s*"([^"]+)"', text):
+        take(match.group(1))
+    for match in re.finditer(r'"\d+"\s*"([A-Za-z]:[^"]*)"', text):
+        take(match.group(1))
+    return found
+
+
+def steam_libraries() -> list[Path]:
+    """Папки библиотек Steam, вместе с самой установкой."""
+    steam = steam_install_path()
+    if steam is None:
+        return []
+    libraries = [steam]
+    for path in parse_library_folders(
+            read_text(steam / "steamapps" / "libraryfolders.vdf")):
+        if path not in libraries and (path / "steamapps").is_dir():
+            libraries.append(path)
+    return libraries
+
+
+def steam_common_dirs() -> list[Path]:
+    """Папки steamapps\\common всех библиотек — их и смотрим как папки с играми."""
+    return [library / "steamapps" / "common" for library in steam_libraries()
+            if (library / "steamapps" / "common").is_dir()]
+
+
+def parse_acf(text: str) -> tuple[str, str]:
+    """Номер игры и папка установки из appmanifest_*.acf."""
+    appid = re.search(r'"appid"\s*"(\d+)"', text)
+    folder = re.search(r'"installdir"\s*"([^"]*)"', text)
+    return (appid.group(1) if appid else "", folder.group(1) if folder else "")
+
+
+def steam_manifest_map(libraries: list[Path] | None = None) -> dict[str, str]:
+    """Номер игры по названию папки — из манифестов Steam.
+
+    Манифест перечитывается, только когда меняется сам файл: при слежении
+    этот список спрашивается каждые несколько секунд, а файлов в нём бывает
+    сколько угодно много.
+    """
+    result: dict[str, str] = {}
+    for library in (steam_libraries() if libraries is None else libraries):
+        steamapps = library / "steamapps"
+        record = CACHE.list_dir(steamapps)
+        if record is None:
+            continue
+        for filename in record[3]:
+            low = filename.lower()
+            if not (low.startswith("appmanifest_") and low.endswith(".acf")):
+                continue
+            path = steamapps / filename
+            key = os.path.normcase(str(path))
+            mark = CACHE.fingerprint(path)
+            remembered = _MANIFEST_CACHE.get(key)
+            if remembered is not None and remembered[0] == mark:
+                appid, folder = remembered[1], remembered[2]
+            else:
+                appid, folder = parse_acf(read_text(path))
+                _MANIFEST_CACHE[key] = [mark, appid, folder]
+            if not (appid and folder and is_appid(appid)):
+                continue
+            for name in (norm(folder), norm(clean_title(folder))):
+                if name:
+                    result.setdefault(name, appid)
     return result
 
 
@@ -1348,12 +1613,15 @@ def find_appid_near(folder: Path, levels: int = 3) -> tuple[str, str]:
 
 def read_steam_appid_txt(path: Path) -> str:
     """steam_appid.txt должен содержать число. Если там ерунда — вернём пусто."""
+    if not CACHE.is_file(path):
+        return ""
     text = read_text(path).strip()
     return text if is_appid(text) else ""
 
 
 def resolve_appid(game: GameInfo, manual: dict[str, str],
-                  hydra_log: dict[str, str], cache: dict, online: bool) -> None:
+                  hydra_log: dict[str, str], cache: dict, online: bool,
+                  steam_map: dict[str, str] | None = None) -> None:
     """Выясняет номер игры и запоминает, откуда он взялся."""
     # 1) нормальный steam_appid.txt
     appid = read_steam_appid_txt(game.path / "steam_settings" / "steam_appid.txt")
@@ -1367,7 +1635,16 @@ def resolve_appid(game: GameInfo, manual: dict[str, str],
         game.appid, game.appid_note = appid, note
         return
 
-    # 3) ручная привязка из games.txt (название можно писать без меток репака)
+    # 3) манифест Steam: номер стоит в appmanifest_<номер>.acf в steamapps
+    if steam_map:
+        for title in (game.path.name, clean_title(game.path.name),
+                      game.path.parent.name, clean_title(game.path.parent.name)):
+            key = norm(title)
+            if key and key in steam_map:
+                game.appid, game.appid_note = steam_map[key], "манифест Steam"
+                return
+
+    # 4) ручная привязка из games.txt (название можно писать без меток репака)
     for key in (norm(game.path.name), norm(game.path.parent.name),
                 norm(clean_title(game.path.name)),
                 norm(clean_title(game.path.parent.name))):
@@ -1375,14 +1652,14 @@ def resolve_appid(game: GameInfo, manual: dict[str, str],
             game.appid, game.appid_note = manual[key], "games.txt"
             return
 
-    # 4) журнал Hydra: сравниваем хвост пути
+    # 5) журнал Hydra: сравниваем хвост пути
     tail = "\\".join(game.path.parts[-2:]).lower()
     for logged_tail, logged_appid in hydra_log.items():
         if logged_tail.endswith(tail):
             game.appid, game.appid_note = logged_appid, "журнал Hydra"
             return
 
-    # 5) магазин Steam (только если разрешено ключом --online)
+    # 6) магазин Steam (только если разрешено ключом --online)
     if online:
         for title in (game.path.name, clean_title(game.path.name),
                       clean_title(game.path.parent.name)):
@@ -1437,11 +1714,24 @@ REGISTRY_MAX_DEPTH = 3      # HKCU\Software\Издатель\Игра — дал
 REGISTRY_MAX_KEYS = 3000    # страховка, чтобы прогон не подвис на чужом ПК
 
 
+# Реестр — лишь подсказка в отчёте, а обход HKCU\Software стоит около
+# двадцати миллисекунд на прогон. Держим последний ответ минуту: за это
+# время там ничего существенного не меняется.
+REGISTRY_TTL = 60.0
+_REGISTRY_CACHE: dict = {"when": 0.0, "limit": None, "data": {}}
+
+
 def scan_registry_achievements(limit: int = REGISTRY_MAX_KEYS) -> dict[str, Achievements]:
     """Собирает из HKCU\\Software значения, похожие на достижения."""
     result: dict[str, Achievements] = {}
     if winreg is None:
         return result
+
+    now = time.monotonic()
+    remembered = _REGISTRY_CACHE
+    if (remembered["data"] and remembered["limit"] == limit
+            and now - remembered["when"] < REGISTRY_TTL):
+        return remembered["data"]
 
     pending = [(root, 0) for root in REGISTRY_ROOTS]
     checked = 0
@@ -1488,6 +1778,8 @@ def scan_registry_achievements(limit: int = REGISTRY_MAX_KEYS) -> dict[str, Achi
                 if sub.lower() in REGISTRY_SKIP or sub.startswith("{"):
                     continue
                 pending.append((path + "\\" + sub, depth + 1))
+
+    _REGISTRY_CACHE.update(when=now, limit=limit, data=result)
     return result
 
 
@@ -1947,11 +2239,14 @@ def collect_sources(roots: list[Path], games: list[GameInfo], ours: set[str],
     # 1. Места, привязанные к номеру игры (в том числе внутри папок игр)
     for game in games:
         # у Unity-игр файлы эмулятора лежат в глубине папки игры, поэтому
-        # шаблоны раскрываем и от корня, и от папки эмулятора
-        for game_dir in (game.path, game.emu_dir):
-            if game_dir is None:
-                continue
-            for label, tpl in LOCATION_TEMPLATES:
+        # шаблоны с {GAME} раскрываем и от корня, и от папки эмулятора
+        game_dirs = (
+            (game.path, game.emu_dir)
+            if game.emu_dir is not None and game.emu_dir != game.path
+            else (game.path,)
+        )
+        for label, tpl in LOCATION_TEMPLATES:
+            for game_dir in (game_dirs if "{GAME}" in tpl else (game.path,)):
                 for base in expand_template(tpl, game.appid, game_dir):
                     for path in candidate_files(base):
                         add(label, path, game.appid)
@@ -1960,12 +2255,11 @@ def collect_sources(roots: list[Path], games: list[GameInfo], ours: set[str],
     #    номером (например папка «0»), поэтому смотрим все подпапки
     for label, tpl in EMU_BASE_DIRS:
         for base in expand_template(tpl, "", None):
-            if not base.is_dir():
+            record = CACHE.list_dir(base)
+            if record is None:
                 continue
-            try:
-                children = sorted(p for p in base.iterdir() if p.is_dir())
-            except OSError:
-                continue
+            children = sorted((base / name for name in (*record[1], *record[2])),
+                              key=lambda p: str(p))
             for folder in children:
                 if folder.name.lower() in ("settings", "config", "userdata"):
                     continue
@@ -2038,22 +2332,47 @@ def collect_sources(roots: list[Path], games: list[GameInfo], ours: set[str],
 # ──────────────────────── база Hydra (подсказка) ──────────────────────────
 
 
+# Ответ запоминаем по отпечаткам файлов базы: их размер и время меняются,
+# когда база обновляется. Иначе пришлось бы каждый прогон перечитывать
+# все .ldb целиком — а это уже настоящая нагрузка на диск.
+_HYDRA_KNOWN_CACHE: dict = {"stamp": None, "known": set()}
+
+
 def hydra_known_appids() -> set[str]:
     """Какие номера игр вообще есть в базе Hydra. Это подсказка, не гарантия:
     часть записей в базе сжата, поэтому что-то может не найтись."""
-    known: set[str] = set()
     db_dir = HYDRA_DIR / "hydra-db"
-    if not db_dir.is_dir():
-        return known
-    for path in db_dir.iterdir():
-        if not path.is_file() or path.suffix.lower() not in (".ldb", ".log"):
-            continue
+    entries = []
+    try:
+        with os.scandir(db_dir) as it:
+            for entry in it:
+                if (entry.is_file()
+                        and os.path.splitext(entry.name)[1].lower() in (".ldb", ".log")):
+                    entries.append(entry)
+    except OSError:
+        return set()
+
+    stamp = []
+    for entry in entries:
         try:
-            data = path.read_bytes()
+            info = entry.stat()
+            stamp.append((entry.name, info.st_size, info.st_mtime_ns))
+        except OSError:
+            stamp.append((entry.name, None, None))
+    stamp = tuple(stamp)
+    if _HYDRA_KNOWN_CACHE["stamp"] == stamp:
+        return _HYDRA_KNOWN_CACHE["known"]
+
+    known: set[str] = set()
+    for entry in entries:
+        try:
+            with open(entry.path, "rb") as handle:
+                data = handle.read()
         except OSError:
             continue
         known.update(m.decode() for m in re.findall(rb"steam:(\d{3,10})", data))
         known.update(m.decode() for m in re.findall(rb'"objectId":"(\d{3,10})"', data))
+    _HYDRA_KNOWN_CACHE.update(stamp=stamp, known=known)
     return known
 
 
@@ -2069,6 +2388,20 @@ def load_state() -> dict:
 
 
 def save_state(state: dict) -> None:
+    """Сохраняет память о своих файлах, не дёргая диск без нужды.
+
+    Если список «наших» файлов не изменился и сам state.json моложе
+    STATE_HEARTBEAT — пропускаем запись. В слежении это снимает запись
+    каждые полминуты, а отметку времени в осмотре всё равно видно свежую.
+    """
+    old = read_json(STATE_FILE)
+    if isinstance(old, dict) and old.get("ours") == state.get("ours"):
+        try:
+            fresh = time.time() - STATE_FILE.stat().st_mtime < STATE_HEARTBEAT
+        except OSError:
+            fresh = False
+        if fresh:
+            return
     write_text_atomic(
         STATE_FILE, json.dumps(state, indent=2, ensure_ascii=False) + "\n"
     )
@@ -2112,15 +2445,59 @@ def write_bridge_file(appid: str, achievements: Achievements, ours: set[str],
         added += 1
 
     if added and not dry_run:
-        write_text_atomic(
-            target,
-            json.dumps(raw, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
-        )
+        try:
+            write_text_atomic(
+                target,
+                json.dumps(raw, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+            )
+        except OSError as error:
+            reason = error.strerror or str(error)
+            return target, 0, ("не смог записать: файл занят другой программой "
+                               f"({reason}) — попробую в следующий раз")
         ours.add(str(target))
     return target, added, ""
 
 
 # ────────────────────────────── отчёт ──────────────────────────────
+
+
+def game_roots(args) -> tuple[list[Path], list[Path]]:
+    """Папки, в которых искать игры.
+
+    Порядок такой: ключ --roots, стандартные папки, roots.txt и — если не
+    выключено ключом --no-auto — папки steamapps\\common всех библиотек Steam.
+    Всё, что попало под маску ignore.txt, выбрасываем.
+
+    Возвращает (все папки, из них найденные в Steam) — второе нужно только
+    для честной строки в отчёте.
+    """
+    masks = load_ignore_masks()
+    roots: list[Path] = []
+    seen: set[str] = set()
+
+    def take(path: Path) -> bool:
+        key = os.path.normcase(str(path))
+        if key in seen:
+            return False
+        seen.add(key)
+        if is_ignored(path, masks) or not path.is_dir():
+            return False
+        roots.append(path)
+        return True
+
+    for raw in (args.roots or DEFAULT_ROOTS):
+        take(Path(raw))
+    for line in read_text(ROOTS_FILE).splitlines():
+        line = line.split("#")[0].strip().strip('"')
+        if line:
+            take(Path(line))
+
+    auto: list[Path] = []
+    if not getattr(args, "no_auto", False):
+        for path in steam_common_dirs():
+            if take(path):
+                auto.append(path)
+    return roots, auto
 
 
 def run_once(args) -> int:
@@ -2135,6 +2512,7 @@ def run_once(args) -> int:
         args._paths = paths
     use_path_cache(paths)
     paths.begin_pass()
+    forget_expansions()
 
     def say(line: str = "") -> None:
         report.append(line)
@@ -2145,13 +2523,13 @@ def run_once(args) -> int:
     say("=" * 60)
     say(f"Обновлено: {time.strftime('%d.%m.%Y %H:%M')}")
 
-    roots = [Path(p) for p in (args.roots or DEFAULT_ROOTS)]
-    for line in read_text(ROOTS_FILE).splitlines():
-        line = line.split("#")[0].strip().strip('"')
-        if line and Path(line).is_dir() and Path(line) not in roots:
-            roots.append(Path(line))
-    roots = [p for p in roots if p.is_dir()]
+    masks = load_ignore_masks()
+    roots, auto_roots = game_roots(args)
     say("Папки с играми: " + (", ".join(str(p) for p in roots) or "нет ни одной"))
+    if auto_roots:
+        say("  из них сам нашёл в Steam: " + ", ".join(str(p) for p in auto_roots))
+    if masks:
+        say(f"  игнорирую по ignore.txt: {plural(len(masks), 'маска', 'маски', 'масок')}")
 
     state = load_state()
     ours = set(state.get("ours") or [])
@@ -2160,11 +2538,13 @@ def run_once(args) -> int:
     manual = load_manual_map()
     own_map = load_own_map()
     hydra_log = load_hydra_log_map()
+    steam_map = {} if getattr(args, "no_auto", False) else steam_manifest_map()
 
-    games = scan_games(roots)
+    games = [g for g in scan_games(roots) if not is_ignored(g.path, masks)]
     for game in games:
-        resolve_appid(game, manual, hydra_log, cache, online=args.online)
-        game.emu_names, _note = identify_emulator(game.path)
+        resolve_appid(game, manual, hydra_log, cache, online=args.online,
+                      steam_map=steam_map)
+        game.emu_names, _note = identify_emulator(game.path, game.emu_dir)
         game.emu_hint = check_steam_dlls(game.path, game.emu_dir)
 
     say(f"Игр в индексе: {len(games)} "
@@ -2180,6 +2560,8 @@ def run_once(args) -> int:
     say()
 
     sources, problems = collect_sources(roots, games, ours, own_map, own_cache)
+    if masks:
+        sources = [s for s in sources if not is_ignored(s.where, masks)]
     known = hydra_known_appids()
 
     # что делать с каждым источником
@@ -2277,18 +2659,41 @@ def run_once(args) -> int:
         state["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
         save_state(state)
         if args.online and cache:
-            write_text_atomic(
+            write_text_if_changed(
                 CACHE_FILE,
                 json.dumps(cache, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
             )
         if own_cache:
-            write_text_atomic(
+            write_text_if_changed(
                 OWN_CACHE_FILE,
                 json.dumps(own_cache, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
             )
 
-    REPORT_FILE.write_text("\n".join(report) + "\n", encoding="utf-8")
+    write_text_if_changed(REPORT_FILE, "\n".join(report) + "\n")
     return 0
+
+
+def report_watch_error(error: BaseException) -> None:
+    """Сообщает о сбое прогона и оставляет след в отчёте.
+
+    Раньше неожиданная ошибка в слежении убивала его молча: под pythonw
+    окна консоли нет, и снаружи всё выглядело так, будто мост работает,
+    а отчёт просто перестал обновляться. Теперь прогон переживает сбой —
+    в консоль и в report.txt попадает, что именно случилось.
+    """
+    stamp = time.strftime("%d.%m.%Y %H:%M:%S")
+    print(f"\nОШИБКА: прогон не удался — {type(error).__name__}: {error}",
+          flush=True)
+    traceback.print_exc()
+    text = ("Мост достижений для Hydra\n"
+            + "=" * 60 + "\n"
+            f"Обновлено: {stamp}\n\n"
+            "ОШИБКА: прогон упал, слежение продолжает работать.\n"
+            f"{type(error).__name__}: {error}\n")
+    try:
+        REPORT_FILE.write_text(text, encoding="utf-8")
+    except OSError:
+        pass
 
 
 # ────────────────────────────── запуск ──────────────────────────────
@@ -2321,6 +2726,149 @@ def acquire_watcher_lock():
         return None
 
 
+def run_doctor(args) -> int:
+    """Осмотр: что мост видит на этом компьютере и чего не хватает.
+
+    Ничего не записывает и игры не трогает — только читает и показывает.
+    Удобно, когда «в лаунчере пусто» и непонятно, с какого конца смотреть.
+    """
+    paths = getattr(args, "_paths", None)
+    if paths is None:
+        paths = PathCache()
+        args._paths = paths
+    use_path_cache(paths)
+    paths.begin_pass()
+    forget_expansions()
+
+    def say(line: str = "") -> None:
+        print(line, flush=True)
+
+    problems: list[str] = []
+
+    say("Осмотр моста: что он видит на этом компьютере")
+    say("=" * 60)
+    say(f"Python: {sys.version.split()[0]}  ({sys.executable})")
+    say(f"Скрипт: {Path(__file__).resolve()}")
+    say()
+
+    # ── главные папки ──
+    say("ГЛАВНЫЕ ПАПКИ")
+    for label, path, must in (
+            ("Hydra (настройки и база)", HYDRA_DIR, True),
+            ("Журнал Hydra", HYDRA_LOG, False),
+            ("Куда пишет мост", BRIDGE_DIR, True),
+            ("Старое место Goldberg", APPDATA / "Goldberg SteamEmu Saves", False)):
+        state = "есть" if path.exists() else "нет"
+        say(f"  {label}: {path} — {state}")
+        if must and state == "нет":
+            problems.append(f"нет папки «{label}»: {path}")
+    say()
+
+    # ── Steam ──
+    say("STEAM")
+    steam = steam_install_path()
+    if steam is None:
+        say("  установка не найдена (ни в реестре, ни в C:\\Program Files (x86)\\Steam)")
+    else:
+        say(f"  установлен здесь: {steam}")
+        libraries = steam_libraries()
+        say(f"  библиотек: {len(libraries)}")
+        for library in libraries:
+            common = library / "steamapps" / "common"
+            record = paths.list_dir(common)
+            count = len(record[1]) if record else 0
+            say(f"      {library} — папок в steamapps\\common: {count}")
+        manifests = steam_manifest_map()
+        say(f"  номеров из манифестов appmanifest_*.acf: {len(manifests)}")
+        if not manifests:
+            problems.append("не нашлось ни одного appmanifest_*.acf — "
+                            "номера из Steam не подтянутся")
+    if getattr(args, "no_auto", False):
+        say("  автопоиск библиотек и манифестов выключен ключом --no-auto")
+    say()
+
+    # ── папки с играми и сами игры ──
+    masks = load_ignore_masks()
+    roots, auto_roots = game_roots(args)
+    say("ПАПКИ С ИГРАМИ")
+    if not roots:
+        say("  ни одной папки — проверь roots.txt и ключ --roots")
+        problems.append("нет ни одной существующей папки с играми")
+    for root in roots:
+        say(f"  {root}" + ("   (сам нашёл в Steam)" if root in auto_roots else ""))
+    if masks:
+        say("  ignore.txt пропускает мимо: " + ", ".join(masks))
+    say()
+
+    cache = read_json(CACHE_FILE) or {}
+    manual = load_manual_map()
+    hydra_log = load_hydra_log_map()
+    steam_map = {} if getattr(args, "no_auto", False) else steam_manifest_map()
+
+    games = [g for g in scan_games(roots) if not is_ignored(g.path, masks)]
+    for game in games:
+        resolve_appid(game, manual, hydra_log, cache, online=False,
+                      steam_map=steam_map)
+        game.emu_names, _note = identify_emulator(game.path, game.emu_dir)
+        game.emu_hint = check_steam_dlls(game.path, game.emu_dir)
+
+    say(f"НАЙДЕНО ИГР: {len(games)} "
+        f"(со схемой достижений: {sum(1 for g in games if g.has_schema)})")
+    for game in sorted(games, key=lambda g: g.title.lower()):
+        if game.appid:
+            appid = f"{game.appid} ({game.appid_note})"
+        else:
+            appid = f"номера нет — {game.appid_note}"
+        say(f"  {game.title} — {appid}; "
+            f"эмулятор: {', '.join(game.emu_names) or 'не опознан'}")
+        if game.emu_hint:
+            say(f"      ⚠ {game.emu_hint}")
+    if not games:
+        problems.append("в папках с играми не нашлось ни одной игры")
+    say()
+
+    # ── где эмуляторы вообще держат достижения ──
+    say("ПАПКИ ЭМУЛЯТОРОВ (Hydra может их не видеть)")
+    any_emu = False
+    for label, tpl in EMU_BASE_DIRS:
+        for base in expand_template(tpl, "", None):
+            if not base.is_dir():
+                continue
+            record = paths.list_dir(base)
+            count = len(record[1]) if record else 0
+            any_emu = True
+            say(f"  {label}: {base} — подпапок: {count}")
+    if not any_emu:
+        say("  ни одной не нашлось — значит, и достижениям взяться пока неоткуда")
+    say()
+
+    # ── память и журналы ──
+    say("ПАМЯТЬ")
+    state = load_state()
+    say(f"  state.json: своих файлов {len(state.get('ours') or [])}, "
+        f"последний обычный прогон: {state.get('last_run') or 'ещё не было'}")
+    known = hydra_known_appids()
+    say(f"  в базе Hydra заметил номеров игр: {len(known)}")
+    if not known:
+        problems.append("база Hydra не нашлась или пуста — "
+                        "подсказки «есть ли игра в лаунчере» не будет")
+    say(f"  журнал Hydra: путей с номерами {len(hydra_log)}")
+    say(f"  steam-cache.json: {len(cache)} записей")
+    say(f"  local-saves-cache.json: {len(read_json(OWN_CACHE_FILE) or {})} записей")
+    say()
+
+    say("ИТОГ:")
+    if problems:
+        for problem in problems:
+            say(f"  ⚠ {problem}")
+        say("  По этим пунктам есть что поправить. Всё остальное на месте.")
+    else:
+        say("  Всё, что нужно мосту, на месте.")
+        say("  Если в лаунчере всё равно пусто — запусти обычный прогон")
+        say("  и посмотри report.txt рядом со скриптом.")
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Собирает достижения из всех эмуляторов в место, "
@@ -2329,14 +2877,20 @@ def main(argv=None) -> int:
         epilog="Примеры:\n"
                "  python bridge.py               обычный прогон\n"
                "  python bridge.py --dry-run     только показать\n"
+               "  python bridge.py --doctor      осмотреть компьютер и ничего не писать\n"
                "  python bridge.py --watch 10    следить, обновляя раз в 10 секунд\n",
     )
     parser.add_argument("--dry-run", action="store_true",
                         help="ничего не писать, только показать план")
+    parser.add_argument("--doctor", action="store_true",
+                        help="осмотреть компьютер и показать, что мост видит; "
+                             "ничего не записывает")
     parser.add_argument("--watch", nargs="?", const=30, type=int, metavar="СЕК",
                         help="повторять прогон каждые N секунд (по умолчанию 30)")
     parser.add_argument("--roots", nargs="+", metavar="ПАПКА",
                         help="дополнительные папки с играми")
+    parser.add_argument("--no-auto", action="store_true", dest="no_auto",
+                        help="не искать папки и номера игр в Steam автоматически")
     parser.add_argument("--online", action="store_true",
                         help="разрешить искать номера игр в магазине Steam")
     parser.add_argument("--full", action="store_true",
@@ -2360,6 +2914,9 @@ def main(argv=None) -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
+
+    if args.doctor:
+        return run_doctor(args)
 
     if not args.watch:
         return run_once(args)
@@ -2390,7 +2947,10 @@ def main(argv=None) -> int:
             if full_every == 0 or now - last_full >= full_every:
                 args._paths.forget()
                 last_full = now
-            run_once(args)
+            try:
+                run_once(args)
+            except Exception as error:      # noqa: BLE001 — слежение не роняем
+                report_watch_error(error)
             print(f"\n(следующая проверка через {interval} секунд)\n")
             time.sleep(interval)
     except KeyboardInterrupt:

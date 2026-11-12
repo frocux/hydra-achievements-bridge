@@ -104,6 +104,15 @@ Popped in-game, and the bridge picked it up along with the rest.
   so Hydra never sees a half-written file — and the previous content stays next to it as `.bak`.
 - **Lost appid recovery**: achievements in a nameless folder (like `GSE Saves\0`) are
   matched against each game's achievement schema and routed to the right game.
+- **Steam does half the work**: libraries are read from `libraryfolders.vdf`, so every
+  `steamapps\common` folder joins the search by itself, and game numbers come from
+  `appmanifest_*.acf` — even when the repack left no number near the game. Opt out with `--no-auto`.
+- **Busy files don't crash it**: if a game holds a file open, the write is retried a few
+  times; if it still fails, the report says so and the run carries on.
+- **A skip list**: `ignore.txt` takes path masks, so old copies and junk folders are
+  passed by instead of showing up as confusing sources.
+- **`--doctor`**: an inspection pass that shows folders, Steam libraries, games, appids and
+  emulator saves, then sums up what's missing — and writes nothing.
 - **Emulator detection**: reports which emulator a game folder uses, and warns when the
   emulator is missing (genuine Valve DLL present).
 - **Game-side saves**: if a game tracks its own achievements (say, a Godot game's
@@ -115,7 +124,7 @@ Popped in-game, and the bridge picked it up along with the rest.
   sweep of `HKCU\Software`, for any emulator that writes there.
 - **Tests on the parsers**: `tests` holds a sample file for each main format — every INI
   flavour, Goldberg/EMPRESS JSON, SmartSteamEmu's binary `stats.bin` — and checks exactly
-  what comes back out of each one, 49 checks in all. Run `run-tests.bat` (or
+  what comes back out of each one, 72 checks in all. Run `run-tests.bat` (or
   `python -m unittest discover -s tests -t .`): no dependencies, nothing written outside
   a temp folder. Being honest: the GreenLuma registry and the Adobe AIR saves have no
   tests yet, so those paths are covered by nothing but a careful read. The same suite
@@ -165,22 +174,37 @@ D:\Games
 E:\SteamLibrary\steamapps\common
 ```
 
+   Steam libraries are found automatically too — the bridge reads Steam's own
+   `libraryfolders.vdf` and adds every `steamapps\common` folder it points to.
+   It also takes game numbers from Steam's `appmanifest_*.acf` files, which is
+   handy when a repack left no number anywhere near the game. Turn all of that
+   off with `--no-auto`.
+
 4. Run `run.bat`, then read `report.txt` — it says what was found and where it went.
 
 Want a dry run first? `check.bat` shows everything without writing a thing.
+Puzzled why the launcher stays empty? `python bridge.py --doctor` walks through
+what the bridge sees — folders, Steam libraries, games, appids, emulator saves —
+and ends with a verdict. It reads only and writes nothing.
 
 ```
 python bridge.py                     normal run
 python bridge.py --dry-run           show what would happen, write nothing
+python bridge.py --doctor            inspect the PC, write nothing
 python bridge.py --watch 10          check every 10 seconds (what autostart uses)
 python bridge.py --watch 30          same, but rarer — much easier on your disk
 python bridge.py --watch             same, but every 30 seconds
 python bridge.py --roots E:\Games    add a game folder
+python bridge.py --no-auto           don't auto-detect Steam libraries and appids
 python bridge.py --online            allow appid lookups in the Steam store
 python bridge.py --quiet             short report
 python bridge.py --watch 30 --full   forget what was found, re-read everything
 python bridge.py --watch 30 --full-every 60   full sweep every 60 seconds
 ```
+
+Got a folder you'd rather the bridge skipped? Put a piece of its path into
+`ignore.txt`, one per line — the comparison ignores case, so `d:\games\old copies`
+is enough. Copy `ignore.example.txt` to `ignore.txt` to start.
 
 While watching, the bridge remembers what it found: it lists each folder once per pass
 and re-reads it only when the folder itself changed. The first pass reads the disk, later
@@ -366,7 +390,9 @@ Where things live:
 | Change how often it checks | the `--watch` flag, or the number in the startup shortcut |
 | Make it ignore what it remembered | `--full`, or `--full-every SEC` for a rarer full sweep |
 | Add my game folders and bindings | `roots.txt`, `games.txt` |
+| Skip a folder altogether | `ignore.txt` — one path mask per line |
 | Games that track achievements themselves | `local-saves.json` |
+| See what the bridge finds on this PC | `python bridge.py --doctor` |
 | Check I didn't break a format | `run-tests.bat` — a test per main format, samples in `tests/samples` |
 
 Comments in the code are Russian, and every table is labelled in words — a beginner can
@@ -384,6 +410,7 @@ README.ru.md            the same page, Russian
 LICENSE                 MIT licence
 roots.txt               your game folders (fill this in)
 games.txt               manual "game folder = appid" bindings
+ignore.txt              path masks to skip (a folder you don't want touched)
 local-saves.json        manual name maps for games with their own achievement log
 state.json              which files the script created (appears after a run)
 report.txt              the last run's report
@@ -393,6 +420,7 @@ local-saves-cache.json  cache of parsed game files
 check.bat, run.bat, watch.bat, autostart-*.bat   Windows launchers
 autostart-on.ps1, autostart-off.ps1              autostart plumbing
 roots.example.txt, games.example.txt             config templates
+ignore.example.txt                               template for the skip list
 run-tests.bat                                    runs the test suite
 tests/                                           tests and the sample files they use
 .github/workflows/                               the same tests on every push (GitHub Actions)
