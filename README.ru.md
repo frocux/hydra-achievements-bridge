@@ -2,6 +2,8 @@
 
 ## 🇬🇧 [Read in English / Английская версия →](README.md)
 
+[![tests](https://github.com/frocux/hydra-achievements-bridge/actions/workflows/tests.yml/badge.svg)](https://github.com/frocux/hydra-achievements-bridge/actions/workflows/tests.yml)
+
 > **Ребят, эта херня меня реально задолбала — и я решил её починить!!**
 > Этот репозиторий перенаправляет достижения в Hydra Launcher. Проблема бесила меня
 > огромное количество времени, так что я сделал решение и делюсь с вами)) Пользуйтесь!)
@@ -92,7 +94,7 @@ C:\Users\Public\Documents\Steam\RUNE\<номер игры>\achievements.ini
 | **Свои сохранения игр** | Если игра сама ведёт учёт достижений (например Godot-игра в `save.json`), скрипт читает и его, а карту «внутреннее имя → имя в Steam» достаёт прямо из файлов игры |
 | **Игры на Adobe AIR** | Flash-порты держат прогресс в `%APPDATA%\<id>\Local Store`, в сжатых `.sav` — скрипт распаковывает их и достаёт оттуда достижения |
 | **Реестр Windows** | GreenLuma (там прогресс в реестре) и вообще обход `HKCU\Software` — на случай эмуляторов, которые пишут туда |
-| **Тесты на разборщики** | В папке `tests` на каждый основной формат лежит образец — все виды INI, JSON Goldberg/EMPRESS, бинарный `stats.bin` — и тест проверяет, что из него читается ровно то, что должно. Всего 49 проверок. Запуск — `run-tests.bat` (или `python -m unittest discover -s tests -t .`): без библиотек, за пределы временной папки ничего не пишется. Честно: реестр GreenLuma и сохранения Adobe AIR тестами пока не покрыты — там только внимательное чтение кода |
+| **Тесты на разборщики** | В папке `tests` на каждый основной формат лежит образец — все виды INI, JSON Goldberg/EMPRESS, бинарный `stats.bin` — и тест проверяет, что из него читается ровно то, что должно. Всего 49 проверок. Запуск — `run-tests.bat` (или `python -m unittest discover -s tests -t .`): без библиотек, за пределы временной папки ничего не пишется. Честно: реестр GreenLuma и сохранения Adobe AIR тестами пока не покрыты — там только внимательное чтение кода. Те же тесты гоняются на GitHub Actions при каждом push, на Python 3.9 и 3.12 — это и есть бейдж наверху страницы |
 
 Куда переносит: в `%APPDATA%\GSE Saves\<номер игры>\achievements.json` в формате
 Goldberg. Это единственное место, которое Hydra читает **для любого** крака,
@@ -342,6 +344,7 @@ autostart-on.ps1, autostart-off.ps1              работа автозапус
 roots.example.txt, games.example.txt             шаблоны настроек
 run-tests.bat                                    прогон тестов
 tests/                                           тесты и образцы форматов для них
+.github/workflows/                               те же тесты на каждый push (GitHub Actions)
 media/                                           картинки и видео для этого README
 ```
 

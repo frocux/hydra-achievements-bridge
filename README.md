@@ -2,6 +2,8 @@
 
 ## 🇷🇺 [Читать по-русски / Read in Russian →](README.ru.md)
 
+[![tests](https://github.com/frocux/hydra-achievements-bridge/actions/workflows/tests.yml/badge.svg)](https://github.com/frocux/hydra-achievements-bridge/actions/workflows/tests.yml)
+
 > **Alright folks, this thing drove me up the wall — so I went and fixed it!!**
 > This repo reroutes your achievements into Hydra Launcher. That bug annoyed the hell
 > out of me for ages, so I built a fix and figured I'd share it. Enjoy!)
@@ -116,7 +118,9 @@ Popped in-game, and the bridge picked it up along with the rest.
   what comes back out of each one, 49 checks in all. Run `run-tests.bat` (or
   `python -m unittest discover -s tests -t .`): no dependencies, nothing written outside
   a temp folder. Being honest: the GreenLuma registry and the Adobe AIR saves have no
-  tests yet, so those paths are covered by nothing but a careful read.
+  tests yet, so those paths are covered by nothing but a careful read. The same suite
+  runs on GitHub Actions on every push, against Python 3.9 and 3.12 — that's the badge
+  at the top of the page.
 
 Output goes to `%APPDATA%\GSE Saves\<appid>\achievements.json` in Goldberg format — the
 one place Hydra reads for *any* crack. Existing foreign files are never overwritten; if
@@ -331,6 +335,7 @@ autostart-on.ps1, autostart-off.ps1              autostart plumbing
 roots.example.txt, games.example.txt             config templates
 run-tests.bat                                    runs the test suite
 tests/                                           tests and the sample files they use
+.github/workflows/                               the same tests on every push (GitHub Actions)
 media/                                           images and video for this README
 ```
 
