@@ -178,7 +178,20 @@ python bridge.py --watch             same, but every 30 seconds
 python bridge.py --roots E:\Games    add a game folder
 python bridge.py --online            allow appid lookups in the Steam store
 python bridge.py --quiet             short report
+python bridge.py --watch 30 --full   forget what was found, re-read everything
+python bridge.py --watch 30 --full-every 60   full sweep every 60 seconds
 ```
+
+While watching, the bridge remembers what it found: it lists each folder once per pass
+and re-reads it only when the folder itself changed. The first pass reads the disk, later
+ones mostly skip it — a few tenths of a second instead of a couple of seconds on 11 games.
+`--full` makes it forget everything and walk the disk from scratch on every pass;
+`--full-every SEC` does that every so often (120 seconds by default) as a safety net.
+
+One caveat: Windows writes a folder's timestamp with a step of about 16 ms, and deleting a
+file does not always bump it. A new or edited achievement file is picked up on the next
+pass; a *deleted* one can linger until the next full sweep — two minutes at most. Nothing
+in normal play deletes achievement files, so in practice you won't notice.
 
 Optional autostart: `autostart-on.bat` drops a `pythonw.exe ... --watch 10` shortcut
 into your Startup folder; `autostart-off.bat` removes it. No admin rights, no services,
@@ -191,9 +204,10 @@ no registry changes. Only one watcher can run at a time — a second one sees th
 
 ## It runs in the background — why it might stutter
 
-The bridge wakes up every 10 seconds, spends about a second on a pass, then sleeps again.
-That second is for 11 games. With three hundred games installed a pass takes noticeably
-longer, and that's worth keeping in mind.
+The bridge wakes up every 10 seconds, checks everything, then sleeps again. The first pass
+reads the disk — about a second for 11 games. The ones after it only re-read folders that
+changed, which is usually a few tenths of a second. With three hundred games installed even
+that is noticeably longer, and it's worth keeping in mind.
 
 Straight talk about the stutter:
 
@@ -350,6 +364,7 @@ Where things live:
 | Teach it to recognise a new emulator | `EMU_MARKERS`, right there |
 | Parse a format it doesn't know | the parsers `parse_ini`, `parse_json_achievements`, `parse_sse_bin`, and the sniffer `sniff_file` that runs them in turn |
 | Change how often it checks | the `--watch` flag, or the number in the startup shortcut |
+| Make it ignore what it remembered | `--full`, or `--full-every SEC` for a rarer full sweep |
 | Add my game folders and bindings | `roots.txt`, `games.txt` |
 | Games that track achievements themselves | `local-saves.json` |
 | Check I didn't break a format | `run-tests.bat` — a test per main format, samples in `tests/samples` |
