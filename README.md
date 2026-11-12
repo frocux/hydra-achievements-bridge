@@ -243,6 +243,9 @@ Read `report.txt`. It'll say one of these:
   script will pull them from the save. Otherwise only reinstalling the emulator helps.
 - **"both slots are taken by foreign files"** — both `GSE Saves` and
   `Goldberg SteamEmu Saves` already hold files for this game that aren't ours.
+- **the game isn't in the report at all, and Hydra shows an empty page** — maybe the
+  emulator never recorded anything. That's a different story, and it has its own
+  section below: [When the emulator recorded nothing at all](#when-the-emulator-recorded-nothing-at-all).
 
 ---
 
@@ -251,20 +254,62 @@ Read `report.txt`. It'll say one of these:
 So we don't oversell this thing. The bridge moves achievements that already exist on
 disk. It can't conjure them up, and it never reaches into your game folders.
 
-**If the game never handed the achievement over, there's nothing to move.** Real case
-from this very PC: Hollow Knight under RUNE. The file Hydra reads —
-`C:\Users\Public\Documents\Steam\RUNE\367520\achievements.ini` — is right there, and
-inside it says `Count=0`. Our diagnosis: the repack came without RUNE's achievement
-schema (`steam_settings\achievements.json`), and without that schema RUNE doesn't know
-the game's achievement list at all, so it wrote none of them down.
-Hydra opens that very file, finds nothing, and
-shows an empty page. The bridge opens it too and finds exactly the same nothing —
-there is physically no data to carry across.
+### When the emulator recorded nothing at all
 
-The fix lives on the game's side: give it a proper achievement schema, or switch the
-build to Goldberg, which pulls the achievement list out of the game itself. Both mean
-digging around in the game folder, so the bridge won't do it behind your back — it
-never writes there at all.
+**If the game never handed the achievement over, there's nothing to move.** Hollow Knight
+is the case from this very PC, but the story isn't about Hollow Knight: any build whose
+emulator never learns the achievement list behaves exactly the same way. Three checks
+tell you which one you're looking at:
+
+1. **Look inside the file Hydra reads.** For Hollow Knight that's
+   `C:\Users\Public\Documents\Steam\RUNE\367520\achievements.ini` — it is right there, and
+   inside it says `Count=0`, with not a single `[ACHIEVEMENT_NAME]` block. The emulator
+   made the file and wrote nothing into it. (The path is printed in the game folder, in
+   `steam_emu.ini` — the line that starts with "Game data is stored at".)
+2. **Search the game's own log for "achievement".** Unity games keep it in
+   `%USERPROFILE%\AppData\LocalLow\<company>\<game>\Player.log`. The game asks the
+   emulator about its progress and gets nothing back — over and over, for every
+   achievement, on every launch. The counts in that file say it better than we can:
+   ```
+   95 Failed to retrieve achievement state for ATTUNEMENT
+   89 Failed to retrieve achievement state for ENCHANTED
+   88 Failed to retrieve achievement state for CHARMED
+   ```
+   As far as the game is concerned you have no achievements at all — so it never reports
+   one, and there is never anything for the emulator to write down.
+3. **Check whether the emulator has an achievement list to answer with.** RUNE and
+   Goldberg take achievement descriptions from a `steam_settings` folder next to the
+   game's `.exe` (`achievements.json` inside it). This repack ships no such folder, so
+   the emulator has an empty catalogue to answer from.
+
+**Our diagnosis, and where it stops being one.** The empty catalogue above looks like the
+reason: no list, no answers, no written achievements. We didn't prove it — we have one
+game's log and one emulator's file, and we can't tell you what RUNE does inside. If you
+know its guts better than we do, an issue would be welcome.
+
+**What we do know: the emulator itself is fine.** On this same PC, under the same RUNE,
+another game's file is filled in — real unlock times and all:
+
+```
+[COMPLETE_PROLOGUE]
+Achieved=1
+CurProgress=0
+MaxProgress=0
+UnlockTime=1780259580
+```
+
+So it isn't "RUNE is broken". It's this particular build.
+
+**What's worth trying** — all of it inside the game folder, which is exactly why the
+bridge won't do it for you:
+
+- give the emulator the achievement list: drop a proper `steam_settings\achievements.json`
+  next to the game's `.exe` (the names and ids are on the game's Steam page);
+- use another crack of the same game — one that ships with the achievement list;
+- if the game keeps its own achievement log, the bridge can read progress from there
+  instead (see "Game-side saves" above) — but only if the game keeps one;
+- or accept it and move on. Hydra reads that same empty file, so nothing is being hidden
+  from you — the achievements genuinely aren't on disk.
 
 **Some emulators hold achievements in memory and only flush them to disk later**, or
 when the game exits. RUNE is one of those. Play, quit the game, let the bridge take a
