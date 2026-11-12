@@ -1,0 +1,33 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: python ${{ matrix.python-version }} on windows
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 — самая старая версия, на которой скрипт ещё работает:
+        # в нём есть dict[str, int], а это как раз Python 3.9.
+        python-version: ["3.9", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Показать версию Python
+        run: python --version
+
+      - name: Тесты разборщиков
+        run: python -m unittest discover -s tests -t .
