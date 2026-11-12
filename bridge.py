@@ -108,6 +108,11 @@ ROOTS_FILE = HERE / "roots.txt"
 OWN_MAP_FILE = HERE / "local-saves.json"  # ручные карты для игр со своим учётом
 OWN_CACHE_FILE = HERE / "local-saves-cache.json"  # кэш разбора файлов игр
 
+# Через сколько секунд кэш обхода (см. PathCache) выбрасывается и обход
+# делается начисто. Страховка: даже если время изменения папки где-то
+# соврёт, раз в две минуты всё равно находится всё.
+FULL_EVERY_DEFAULT = 120
+
 MAX_DEPTH = 5            # на сколько папок вглубь роемся в поисках игр
 MAX_SNIFF_SIZE = 8 << 20   # файлы больше 8 МБ на разбор не берём
 MAX_MAP_FILE_SIZE = 400 << 20  # но файлы игр для карты достижений — до 400 МБ
@@ -276,21 +281,179 @@ def parse_ini(text: str) -> dict[str, dict[str, str]]:
     return sections
 
 
+# ─────────────────── кэш обхода: что лежит в папках ───────────────────
+#
+# Один прогон проверяет одни и те же пути тысячи раз: только в поиске
+# сохранений игры набирается под три тысячи проверок, и каждая — обращение
+# к диску. Диск от этого просыпается и шумит, поэтому запоминаем:
+#
+#   * что лежит в папке — по времени её изменения. Появился или исчез
+#     файл — время поменялось, и запись сама устарела;
+#   * что внутри файла — по его размеру и времени. Правка файла папку
+#     не трогает, поэтому содержимое проверяем отдельно.
+#
+# Кэш живёт в памяти процесса, на диск не пишется: устареть он не может
+# по построению, а переживать перезапуск ему незачем. Слежение держит его
+# между прогонами и время от времени (FULL_EVERY_DEFAULT) выбрасывает.
+
+
+class PathCache:
+    """Помнит содержимое папок и файлов, чтобы не бегать по диску лишний раз."""
+
+    def __init__(self):
+        self.dirs: dict[str, list] = {}    # папка → [время, подпапки, ярлыки, файлы, таблица имён]
+        self.files: dict[str, list] = {}   # файл → [отпечаток, формат, достижения, пояснение]
+        self.verdicts: dict = {}           # набор dll → вердикт «эмулятор работает или нет»
+        self.checked: set[str] = set()     # папки, которые в этом прогоне уже проверяли
+        self.reads = 0                     # сколько раз реально читали список файлов
+
+    def begin_pass(self) -> None:
+        """Новый прогон: папки проверяем заново, но каждую — по одному разу.
+
+        Внутри прогона время папки не переспрашиваем: прогон и так снимает
+        срез, а переспрашивать — это те же тысячи обращений к диску.
+        """
+        self.checked.clear()
+
+    def list_dir(self, path: Path):
+        """Что лежит в папке: [время, подпапки, ярлыки, файлы, таблица имён].
+
+        None — если это не папка или в неё не пускают. Порядок имён — тот же,
+        что выдаёт диск: на него опирается обход, чтобы не менять отчёт.
+        """
+        key = os.path.normcase(str(path))
+        if key in self.checked:
+            return self.dirs.get(key)
+        self.checked.add(key)
+
+        try:
+            mtime = os.stat(path).st_mtime_ns
+        except OSError:
+            self.dirs.pop(key, None)
+            return None
+
+        remembered = self.dirs.get(key)
+        if remembered is not None and remembered[0] == mtime:
+            return remembered
+
+        dirs: list[str] = []
+        links: list[str] = []
+        files: list[str] = []
+        try:
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            dirs.append(entry.name)
+                        elif entry.is_dir():
+                            links.append(entry.name)   # ярлык или junction на папку
+                        else:
+                            files.append(entry.name)
+                    except OSError:
+                        continue
+        except OSError:
+            self.dirs.pop(key, None)
+            return None
+
+        self.reads += 1
+        record = [mtime, dirs, links, files, None]
+        self.dirs[key] = record
+        return record
+
+    @staticmethod
+    def names(record: list) -> dict:
+        """Таблица «имя в нижнем регистре → что это» для одной папки.
+
+        Собирается один раз на прочитанный список: иначе на каждый вопрос
+        «а это папка?» пришлось бы перебирать все имена подряд.
+        """
+        table = record[4]
+        if table is None:
+            table = {}
+            for names, what in ((record[1], "папка"), (record[2], "ярлык"),
+                                (record[3], "файл")):
+                for name in names:
+                    table.setdefault(os.path.normcase(name), what)
+            record[4] = table
+        return table
+
+    def kind(self, path: Path) -> str:
+        """Что это: «папка», «ярлык», «файл» или «нет» (пустая строка).
+
+        Спрашиваем не диск, а список соседей: он всё равно уже прочитан.
+        """
+        parent = path.parent
+        if parent == path:                  # корень диска: соседей у него нет
+            try:
+                return "папка" if path.is_dir() else ("файл" if path.exists() else "")
+            except OSError:
+                return ""
+        record = self.list_dir(parent)
+        if record is None:
+            return ""
+        return self.names(record).get(os.path.normcase(path.name), "")
+
+    def is_dir(self, path: Path) -> bool:
+        return self.kind(path) in ("папка", "ярлык")   # ярлык — тоже папка, как и раньше
+
+    def is_file(self, path: Path) -> bool:
+        return self.kind(path) == "файл"
+
+    def exists(self, path: Path) -> bool:
+        return self.kind(path) != ""
+
+    def fingerprint(self, path: Path):
+        """Размер и время файла — по ним видно, менялся ли он."""
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return None
+        return stat.st_size, stat.st_mtime_ns
+
+    def forget(self) -> None:
+        """Забыть всё: следующий обход пойдёт начисто."""
+        self.dirs.clear()
+        self.files.clear()
+        self.verdicts.clear()
+        self.checked.clear()
+
+
+# Текущий кэш. Прогон подменяет его своим (см. use_path_cache), а если
+# ничего не подменено — работает пустой, и всё читается с диска как раньше.
+CACHE = PathCache()
+
+
+def use_path_cache(cache: PathCache) -> PathCache:
+    """Сделать кэш текущим и вернуть прежний (чтобы потом вернуть обратно)."""
+    global CACHE
+    previous, CACHE = CACHE, cache
+    return previous
+
+
 def iter_dirs(root: Path, max_depth: int = MAX_DEPTH):
-    """Обходит папку вглубь, пропуская мусорные каталоги."""
-    if not root.is_dir():
+    """Обходит папку вглубь, пропуская мусорные каталоги.
+
+    Порядок тот же, что у os.walk: папка, потом её подпапки по очереди.
+    """
+    if not CACHE.is_dir(root):
         return
     base_depth = len(root.parts)
-    for dirpath, dirnames, filenames in os.walk(root):
-        here = Path(dirpath)
+    stack = [root]
+    while stack:
+        here = stack.pop()
+        record = CACHE.list_dir(here)
+        if record is None:
+            continue
+        files = record[3]
         depth = len(here.parts) - base_depth
-        dirnames[:] = [
-            d for d in dirnames
-            if d.lower() not in SKIP_DIRS and not d.startswith("$")
-        ]
         if depth >= max_depth:
-            dirnames[:] = []
-        yield here, dirnames, filenames
+            dirs = []
+        else:
+            dirs = [d for d in record[1]
+                    if d.lower() not in SKIP_DIRS and not d.startswith("$")]
+        yield here, dirs, files
+        for name in reversed(dirs):
+            stack.append(here / name)
 
 
 def find_files(root: Path, names: set[str], max_depth: int = MAX_DEPTH):
@@ -652,11 +815,27 @@ def sniff_file(path: Path) -> tuple[str, Achievements, str]:
 
     Возвращает (название формата, достижения, пояснение). Пусто — не вышло.
     Именно это и позволяет поддерживать новые эмуляторы без правок кода.
+
+    Разбор запоминается по размеру и времени файла: если файл не менялся,
+    второй раз его читать незачем — а во время игры он меняется на каждой
+    открытой ачивке, и тогда перечитываем.
     """
-    try:
-        size = path.stat().st_size
-    except OSError:
+    key = os.path.normcase(str(path))
+    mark = CACHE.fingerprint(path)
+    if mark is None:
+        CACHE.files.pop(key, None)
         return "", {}, ""
+    remembered = CACHE.files.get(key)
+    if remembered is not None and remembered[0] == mark:
+        return remembered[1], dict(remembered[2]), remembered[3]
+
+    shape, found, note = sniff_file_uncached(path, mark[0])
+    CACHE.files[key] = [mark, shape, dict(found), note]
+    return shape, found, note
+
+
+def sniff_file_uncached(path: Path, size: int) -> tuple[str, Achievements, str]:
+    """Собственно разбор — без памяти, всегда читает файл заново."""
     if size == 0:
         return "", {}, "файл пустой"
     if size > MAX_SNIFF_SIZE:
@@ -796,7 +975,7 @@ def candidate_files(base: Path, deep: int = DEEP_LEVELS):
     Кроме файлов с «говорящими» именами смотрим и на конфиги эмуляторов:
     некоторые (например SOVEREIGN.ini) держат достижения прямо внутри себя.
     """
-    if not base.is_dir():
+    if not CACHE.is_dir(base):
         return
     for here, _dirnames, filenames in iter_dirs(base, deep):
         for filename in filenames:
@@ -834,18 +1013,19 @@ def expand_template(tpl: str, appid: str, game_dir: Path | None) -> list[Path]:
         following: list[Path] = []
         for base in current:
             if part == "*":
-                try:
-                    following.extend(p for p in base.iterdir() if p.is_dir())
-                except OSError:
+                record = CACHE.list_dir(base)
+                if record is None:
                     continue
+                for name in record[1] + record[2]:    # подпапки и ярлыки на них
+                    following.append(base / name)
             else:
                 candidate = base / part
-                if candidate.exists():
+                if CACHE.exists(candidate):
                     following.append(candidate)
         current = following
         if not current:
             return []
-    return [p for p in current if p.exists()]
+    return [p for p in current if CACHE.exists(p)]
 
 
 # ─────────── что за эмулятор стоит в папке игры (мост сам смотрит) ───────────
@@ -924,7 +1104,7 @@ def check_steam_dlls(game_dir: Path, emu_dir: Path | None = None) -> str:
     хоть какие-то собственные файлы эмулятора.
     """
     for base in (game_dir, emu_dir):
-        if base is None or not base.is_dir():
+        if base is None or not CACHE.is_dir(base):
             continue
         for here, _dirnames, filenames in iter_dirs(base, 3):
             low = {f.lower() for f in filenames}
@@ -941,6 +1121,13 @@ def check_steam_dlls(game_dir: Path, emu_dir: Path | None = None) -> str:
     if not dlls:
         return ""
 
+    # Библиотеки весят мегабайты, а меняются только при переустановке
+    # эмулятора — значит, и вердикт можно помнить по их отпечаткам.
+    marks = tuple((os.path.normcase(str(dll)), CACHE.fingerprint(dll)) for dll in dlls)
+    remembered = CACHE.verdicts.get(marks)
+    if remembered is not None:
+        return remembered
+
     emulator = valve = False
     for dll in dlls:
         data = read_bytes(dll, 6 << 20).lower()
@@ -948,10 +1135,12 @@ def check_steam_dlls(game_dir: Path, emu_dir: Path | None = None) -> str:
             emulator = True
         if any(marker in data for marker in VALVE_DLL_MARKERS):
             valve = True
+    verdict = ""
     if not emulator and valve:
-        return ("эмулятор не работает: рядом лежит оригинальная steam_api от Valve "
-                "(похоже, его удалил антивирус)")
-    return ""
+        verdict = ("эмулятор не работает: рядом лежит оригинальная steam_api от Valve "
+                   "(похоже, его удалил антивирус)")
+    CACHE.verdicts[marks] = verdict
+    return verdict
 
 
 # ──────────────────── номер игры и папки игр ────────────────────
@@ -1448,31 +1637,46 @@ OWN_SAVE_NAMES = {"save.json", "savegame.json", "achievements.json", "progress.j
                   "save_data.json", "data.json", "userdata.json", "achievements.dat"}
 
 
-def find_own_save(game_dir: Path, titles: list[str]) -> Path | None:
+def own_save_bases() -> dict[str, list[Path]]:
+    """Папки, где игры держат свои сохранения, разложенные по названиям.
+
+    Собираем один раз на прогон: этих папок немного, а игр много, и раньше
+    они разворачивались заново под каждую игру.
+    """
+    index: dict[str, list[Path]] = {}
+    for tpl in OWN_SAVE_BASES:
+        for base in expand_template(tpl, "", None):
+            if not CACHE.is_dir(base):
+                continue
+            index.setdefault(norm(base.name), []).append(base)
+    return index
+
+
+def find_own_save(index: dict[str, list[Path]], titles: list[str]) -> Path | None:
     """Ищет сохранение игры с её собственным учётом достижений."""
     wanted = {norm(t) for t in titles if t and norm(t)}
     if not wanted:
         return None
 
-    for tpl in OWN_SAVE_BASES:
-        for base in expand_template(tpl, "", None):
-            if not base.is_dir():
-                continue
-            if norm(base.name) not in wanted:
-                continue
+    for name, bases in index.items():
+        if name not in wanted:
+            continue
+        for base in bases:
             best: Path | None = None
+            best_when = 0.0
             for here, _dirnames, filenames in iter_dirs(base, 2):
                 for filename in filenames:
                     if filename.lower() not in OWN_SAVE_NAMES:
                         continue
                     path = here / filename
                     try:
-                        if path.stat().st_size > 4 << 20:
-                            continue
+                        stat = path.stat()
                     except OSError:
                         continue
-                    if best is None or path.stat().st_mtime > best.stat().st_mtime:
-                        best = path
+                    if stat.st_size > 4 << 20:
+                        continue
+                    if best is None or stat.st_mtime > best_when:
+                        best, best_when = path, stat.st_mtime
             if best is not None:
                 return best
     return None
@@ -1502,6 +1706,7 @@ def game_binary(game_dir: Path) -> Path | None:
 def collect_own_saves(games: list[GameInfo], own_map: dict, cache: dict) -> list["Source"]:
     """Ищет игры, которые сами ведут учёт достижений (эмулятор не работает)."""
     sources: list[Source] = []
+    index = own_save_bases()
     for game in games:
         titles = [game.path.name, game.path.name.split("-")[0].strip()]
         seen: set[str] = set()
@@ -1515,7 +1720,7 @@ def collect_own_saves(games: list[GameInfo], own_map: dict, cache: dict) -> list
         if isinstance(manual, dict) and manual.get("save"):
             titles.insert(0, str(manual["save"]))
 
-        save_file = find_own_save(game.path, titles)
+        save_file = find_own_save(index, titles)
         if save_file is None:
             continue
         data = read_json(save_file)
@@ -1922,6 +2127,15 @@ def run_once(args) -> int:
     started = time.time()
     report: list[str] = []
 
+    # Память обхода: в слежении она живёт между прогонами (main её и заводит),
+    # при разовом запуске создаётся пустая — тогда всё читается с диска.
+    paths = getattr(args, "_paths", None)
+    if paths is None:
+        paths = PathCache()
+        args._paths = paths
+    use_path_cache(paths)
+    paths.begin_pass()
+
     def say(line: str = "") -> None:
         report.append(line)
         if not args.quiet or line.startswith(("МОСТ", "ОШИБКА", "ИТОГО")):
@@ -2125,6 +2339,12 @@ def main(argv=None) -> int:
                         help="дополнительные папки с играми")
     parser.add_argument("--online", action="store_true",
                         help="разрешить искать номера игр в магазине Steam")
+    parser.add_argument("--full", action="store_true",
+                        help="при слежении каждый раз обходить всё начисто, "
+                             "ничего не помня о папках")
+    parser.add_argument("--full-every", type=int, dest="full_every", metavar="СЕК",
+                        help="как часто при слежении обходить всё начисто "
+                             f"(по умолчанию {FULL_EVERY_DEFAULT}; 0 — каждый раз)")
     parser.add_argument("--quiet", action="store_true",
                         help="короткий отчёт")
     args = parser.parse_args(argv)
@@ -2150,11 +2370,26 @@ def main(argv=None) -> int:
         return 0
 
     interval = max(5, args.watch)
+    full_every = FULL_EVERY_DEFAULT if args.full_every is None else args.full_every
+    if args.full:
+        full_every = 0
+    full_every = max(0, full_every)
+
+    args._paths = PathCache()
     print(f"Слежу за достижениями, обновляю раз в {interval} секунд. "
           f"Закрыть — Ctrl+C.")
+    if full_every:
+        print(f"Что лежит в папках, помню и перечитываю раз в "
+              f"{plural(full_every, 'секунду', 'секунды', 'секунд')} "
+              f"— а если папка изменилась, то сразу.")
     print()
+    last_full = time.monotonic()
     try:
         while True:
+            now = time.monotonic()
+            if full_every == 0 or now - last_full >= full_every:
+                args._paths.forget()
+                last_full = now
             run_once(args)
             print(f"\n(следующая проверка через {interval} секунд)\n")
             time.sleep(interval)

@@ -31,6 +31,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -456,6 +457,169 @@ class RepoHygieneTest(unittest.TestCase):
                 if needle in text:
                     bad.append(f"{path.relative_to(root)} → {needle}")
         self.assertEqual(bad, [], f"в файлах репозитория остались личные данные: {bad}")
+
+
+class PathCacheTest(unittest.TestCase):
+    """Память обхода: она и тормозить не должна, и изменения прятать не смеет.
+
+    Смысл кэша в том, чтобы не спрашивать диск по десять тысяч раз за прогон.
+    Но если он «залипнет», человек просто не увидит новую ачивку — а это
+    похуже тормозов. Поэтому проверяем обе стороны: и что лишний раз на диск
+    не ходим, и что любое изменение всё равно замечаем.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self._saved = bridge.use_path_cache(bridge.PathCache())
+
+    def tearDown(self):
+        bridge.use_path_cache(self._saved)
+        self._tmp.cleanup()
+
+    @staticmethod
+    def settle():
+        """Даёт файловому времени смениться.
+
+        Windows пишет время изменения папки с шагом около 15,6 мс: создай и
+        удали файл внутри одного шага — время останется прежним, и кэш честно
+        решит, что ничего не менялось. В жизни между прогонами проходят
+        секунды, а тесту приходится подождать нарочно.
+        """
+        time.sleep(0.03)
+
+    def test_listing_is_read_from_disk_once_per_pass(self):
+        folder = self.root / "game"
+        folder.mkdir()
+        (folder / "a.txt").write_text("x", encoding="utf-8")
+        (folder / "b.txt").write_text("y", encoding="utf-8")
+
+        bridge.CACHE.begin_pass()
+        for _ in range(50):
+            self.assertEqual(bridge.CACHE.list_dir(folder)[3], ["a.txt", "b.txt"])
+        self.assertEqual(bridge.CACHE.reads, 1)
+
+    def test_new_file_is_noticed_in_the_next_pass(self):
+        folder = self.root / "game"
+        folder.mkdir()
+
+        bridge.CACHE.begin_pass()
+        self.assertEqual(bridge.CACHE.list_dir(folder)[3], [])
+
+        self.settle()
+        (folder / "new.json").write_text("{}", encoding="utf-8")
+
+        # внутри прогона срез не переспрашиваем — это осознанно;
+        # в следующем прогоне папка перечитывается
+        bridge.CACHE.begin_pass()
+        self.assertEqual(bridge.CACHE.list_dir(folder)[3], ["new.json"])
+
+    def test_removed_file_is_noticed_in_the_next_pass(self):
+        folder = self.root / "game"
+        folder.mkdir()
+        (folder / "gone.json").write_text("{}", encoding="utf-8")
+
+        bridge.CACHE.begin_pass()
+        self.assertEqual(bridge.CACHE.list_dir(folder)[3], ["gone.json"])
+
+        self.settle()
+        (folder / "gone.json").unlink()
+
+        bridge.CACHE.begin_pass()
+        self.assertEqual(bridge.CACHE.list_dir(folder)[3], [])
+
+    def test_changed_file_is_reparsed(self):
+        """Перезапись файла папку не трогает — содержимое ловим отдельно."""
+        folder = self.root / "emu"
+        folder.mkdir()
+        target = folder / "achievements.json"
+
+        target.write_text(json.dumps({"FIRST": {"earned": True, "earned_time": WHEN}}),
+                          encoding="utf-8")
+        bridge.CACHE.begin_pass()
+        _shape, found, _note = bridge.sniff_file(target)
+        self.assertEqual(list(found), ["FIRST"])
+
+        target.write_text(json.dumps({
+            "FIRST": {"earned": True, "earned_time": WHEN},
+            "SECOND": {"earned": True, "earned_time": WHEN},
+        }), encoding="utf-8")
+        bridge.CACHE.begin_pass()
+        _shape, found, _note = bridge.sniff_file(target)
+        self.assertEqual(sorted(found), ["FIRST", "SECOND"])
+
+    def test_sniff_result_is_returned_as_a_copy(self):
+        """Правка того, что вернул «нюхач», не должна портить память."""
+        folder = self.root / "emu"
+        folder.mkdir()
+        target = folder / "achievements.json"
+        target.write_text(json.dumps({"ONE": {"earned": True, "earned_time": WHEN}}),
+                          encoding="utf-8")
+
+        bridge.CACHE.begin_pass()
+        _shape, first, _note = bridge.sniff_file(target)
+        first["ONE"] = 0
+        first["ВРЕДНЫЙ"] = 1
+
+        _shape, second, _note = bridge.sniff_file(target)
+        self.assertEqual(second, {"ONE": WHEN})
+
+    def test_kind_agrees_with_the_filesystem(self):
+        folder = self.root / "dir"
+        folder.mkdir()
+        (folder / "file.txt").write_text("x", encoding="utf-8")
+        missing = folder / "нет-такого"
+
+        bridge.CACHE.begin_pass()
+        for checker, expected in (
+            (bridge.CACHE.is_dir, {folder: True, folder / "file.txt": False, missing: False}),
+            (bridge.CACHE.is_file, {folder: False, folder / "file.txt": True, missing: False}),
+            (bridge.CACHE.exists, {folder: True, folder / "file.txt": True, missing: False}),
+        ):
+            for path, answer in expected.items():
+                self.assertEqual(checker(path), answer, f"{checker.__name__} для {path}")
+
+    def test_walk_order_matches_os_walk(self):
+        """Порядок обхода — как у os.walk: от него зависит, что попадёт в отчёт."""
+        for name in ("a", "b", "c"):
+            (self.root / name).mkdir()
+            (self.root / name / f"{name}.txt").write_text(name, encoding="utf-8")
+        (self.root / "c" / "deep").mkdir()
+        (self.root / "c" / "deep" / "x.txt").write_text("x", encoding="utf-8")
+        (self.root / "$Recycle.Bin").mkdir()
+        (self.root / "node_modules").mkdir()
+
+        bridge.CACHE.begin_pass()
+        ours = [(str(here), sorted(dirs), sorted(files))
+                for here, dirs, files in bridge.iter_dirs(self.root)]
+
+        # Образец — тот же os.walk, но с правилами моста: мусорные папки и
+        # ярлыки с «$» в обход не берём, глубже MAX_DEPTH не лезем. Списки
+        # правим на месте (`dirs[:]`): именно так os.walk узнаёт, куда не надо.
+        walk = []
+        for dirpath, dirs, files in os.walk(self.root):
+            here = Path(dirpath)
+            if len(here.relative_to(self.root).parts) >= bridge.MAX_DEPTH:
+                dirs[:] = []
+            else:
+                dirs[:] = [d for d in dirs
+                           if d.lower() not in bridge.SKIP_DIRS and not d.startswith("$")]
+            walk.append((str(here), sorted(dirs), sorted(files)))
+        self.assertEqual(ours, walk)
+
+    def test_forget_makes_the_next_pass_read_from_disk(self):
+        folder = self.root / "game"
+        folder.mkdir()
+        (folder / "a.txt").write_text("x", encoding="utf-8")
+
+        bridge.CACHE.begin_pass()
+        bridge.CACHE.list_dir(folder)
+        reads = bridge.CACHE.reads
+
+        bridge.CACHE.forget()
+        bridge.CACHE.begin_pass()
+        bridge.CACHE.list_dir(folder)
+        self.assertEqual(bridge.CACHE.reads, reads + 1)
 
 
 if __name__ == "__main__":
